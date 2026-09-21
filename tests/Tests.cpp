@@ -122,7 +122,41 @@ int main()
         {"member_effects", "local n=0; local t=setmetatable({}, {__index=function(_,k) n+=1 return function() n+=10 return n end end}); "
                            "local f=t.a; local g=t.b; return f(),g(),n"},
         {"binary_concat", "local function f(x,y,z) return x..y..z end return f('a','b','c')"},
-        {"yield", "local f=coroutine.wrap(function() for i=1,3 do coroutine.yield(i) end return 4 end); return f(),f(),f(),f()"}};
+        {"yield", "local f=coroutine.wrap(function() for i=1,3 do coroutine.yield(i) end return 4 end); return f(),f(),f(),f()"},
+        {"cf_enum_chain",
+         "local function f(x) local result; if x==1 or x==2 or x==3 then result=8 elseif x==4 then result=9 else return -1 end "
+         "return result+10 end return f(0),f(1),f(2),f(3),f(4),f(5)"},
+        {"cf_early_return", "local function f(x,y) if x==1 then return 7 end local result=0; if x==2 or x==3 then "
+                            "if y then result=4 else return 8 end elseif x==4 then result=6 else return 9 end return result+2 end "
+                            "return f(1,false),f(2,false),f(2,true),f(3,true),f(4,false),f(5,true)"},
+        {"cf_boolean_values",
+         "local function f(a,b,c) local x=a and b and c; local y=a or b or c; "
+         "return x,y,if a then b else nil,if a then b else false end "
+         "local out={}; for _,a in {false,0,1} do for _,b in {false,2} do "
+         "local x,y,z,w=f(a,b,3); out[#out+1]=tostring(x)..tostring(y)..tostring(z)..tostring(w) end end return table.concat(out,'|')"},
+        {"cf_condition_effects", "local log=''; local function test(x) log..=tostring(x); return x==2 or x==4 end "
+                                 "for i=1,5 do if test(i) or test(i+1) or test(i+2) then log..='T' else log..='F' end "
+                                 "if test(i) and test(i+1) then log..='Y' end end return log"},
+        {"cf_shared_suffix", "local function f(x) local result=0; if x<5 then if x<3 then result=1 else result=2 end "
+                             "result+=8 else result=3; result+=8 end return result end return f(1),f(4),f(7)"},
+        {"cf_scope_capture", "local function f(x) local r; if x then local value=7; r=function() return value end "
+                             "else local value=9; r=function() return value end end return r() end return f(false),f(true)"},
+        {"cf_loop_exit", "local sum=0; for i=1,7 do if i==1 or i==2 then continue end "
+                         "if i==5 or i==6 then break end sum+=i end return sum"},
+        {"cf_parenthesized_call", "local log=0; local t=setmetatable({}, {__call=function() log+=1 end}); "
+                                  "local f=function() return t end; (f())(); (f())(); return log"},
+        {"cf_names", "local Value1=3; local function f(Argument1) local UserInputService=Argument1; "
+                     "return function(Value2) local Value3=Value2+UserInputService; return Value3+Value1 end end return f(7)(9)"},
+        {"cf_method_install", "local t={x=5}; function t:read() return self.x end function t:set(x) self.x=x end "
+                              "local a=t:read(); t:set(9); return a,t:read()"},
+        {"cf_method_order", "local log=''; local t=setmetatable({}, {__index=function(_,key) log..='lookup'; "
+                            "return function(_,x) log..=x end end}); local function f() log..='arg'; return 'call' end "
+                            "local x=f(); t:method(x); t:method(f()); return log"},
+        {"cf_field_order", "local log=''; local t=setmetatable({}, {__newindex=function(_,key,x) log..=key..x end}); "
+                           "local function f() log..='rhs'; return 'value' end local x=f(); t.field=x; t.field=f(); return log"},
+        {"cf_mixed_logic", "local function f(a,b,c,d) if not a and b or c and not d then return 1 else return 2 end end "
+                           "local result=''; for _,a in {false,true} do for _,b in {false,true} do for _,c in {false,true} do "
+                           "for _,d in {false,true} do result..=f(a,b,c,d) end end end end return result"}};
     unsigned Passed = 0, Failed = 0;
     for (const auto &[Name, Source] : Fixtures)
         for (int Optimization = 0; Optimization <= 2; ++Optimization)
@@ -139,7 +173,12 @@ int main()
                         auto Expected = Execute(Original);
                         Taze::Options Settings;
                         Settings.ForceStateMachine = StateMachine;
-                        Generated = Taze::Decompile(Original, Settings).Source;
+                        auto Result = Taze::Decompile(Original, Settings);
+                        Generated = Result.Source;
+                        if (Generated.find(';') != std::string::npos)
+                            throw std::runtime_error("Generated a statement semicolon");
+                        if (!StateMachine && Name.starts_with("cf_") && Result.StateMachineFunctions)
+                            throw std::runtime_error("Reducible control flow used state-machine fallback");
                         auto Recompiled = Luau::compile(Generated, Compile);
                         if (Recompiled[0] == 0)
                             throw std::runtime_error("Output does not compile: " + Recompiled.substr(1));

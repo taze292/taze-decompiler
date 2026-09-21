@@ -1,4 +1,5 @@
 #include "Bytecode.hpp"
+#include "ControlFlow.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -82,12 +83,232 @@ std::string Join(const std::vector<std::string> &Items, const std::string &Separ
     }
     return Out;
 }
-bool Atomic(const std::string &Text)
+std::size_t Closing(const std::string &Text, std::size_t Start)
 {
-    if (Identifier(Text))
-        return true;
-    auto References = Tokens(Text);
-    return References.size() == 1 && Text == Token(References[0]);
+    char Open = Text[Start], Close = Open == '(' ? ')' : ']';
+    unsigned Depth = 0;
+    char QuoteChar = 0;
+    for (std::size_t I = Start; I < Text.size(); ++I)
+    {
+        char C = Text[I];
+        if (QuoteChar)
+        {
+            if (C == '\\')
+                ++I;
+            else if (C == QuoteChar)
+                QuoteChar = 0;
+            continue;
+        }
+        if (C == '\'' || C == '"')
+        {
+            QuoteChar = C;
+            continue;
+        }
+        if (C == Open)
+            ++Depth;
+        if (C == Close && --Depth == 0)
+            return I;
+    }
+    return std::string::npos;
+}
+
+std::string Unwrap(std::string Text)
+{
+    while (Text.size() >= 2 && Text.front() == '(' && Closing(Text, 0) == Text.size() - 1)
+        Text = Text.substr(1, Text.size() - 2);
+    return Text;
+}
+
+bool PrefixExpression(const std::string &Text)
+{
+    std::size_t Pos = 0;
+    auto Name = [&]()
+    {
+        auto Start = Pos;
+        if (Pos < Text.size() && Text[Pos] == '\x1f')
+        {
+            auto End = Text.find('\x1e', Pos);
+            if (End == std::string::npos)
+                return false;
+            Pos = End + 1;
+            return true;
+        }
+        while (Pos < Text.size() && (std::isalnum(static_cast<unsigned char>(Text[Pos])) || Text[Pos] == '_'))
+            ++Pos;
+        return Identifier(Text.substr(Start, Pos - Start));
+    };
+    if (!Name())
+        return false;
+    while (Pos < Text.size())
+    {
+        if (Text[Pos] == '.' || Text[Pos] == ':')
+        {
+            ++Pos;
+            if (!Name())
+                return false;
+        }
+        else if (Text[Pos] == '(' || Text[Pos] == '[')
+        {
+            auto End = Closing(Text, Pos);
+            if (End == std::string::npos)
+                return false;
+            Pos = End + 1;
+        }
+        else
+            return false;
+    }
+    return true;
+}
+
+std::string CleanExpression(std::string Text)
+{
+    if (Text.find('\n') != std::string::npos)
+        return Text;
+    char QuoteChar = 0;
+    for (std::size_t Pos = 0; Pos < Text.size(); ++Pos)
+    {
+        if (QuoteChar)
+        {
+            if (Text[Pos] == '\\')
+                ++Pos;
+            else if (Text[Pos] == QuoteChar)
+                QuoteChar = 0;
+            continue;
+        }
+        if (Text[Pos] == '\'' || Text[Pos] == '"')
+        {
+            QuoteChar = Text[Pos];
+            continue;
+        }
+        if (Text[Pos] != '(')
+            continue;
+        auto End = Closing(Text, Pos);
+        if (End == std::string::npos || End + 1 == Text.size())
+            continue;
+        if (std::string(".:[(").find(Text[End + 1]) == std::string::npos)
+            continue;
+        auto Inner = Text.substr(Pos + 1, End - Pos - 1);
+        if (PrefixExpression(Inner))
+        {
+            Text.erase(End, 1);
+            Text.erase(Pos, 1);
+            if (Pos)
+                --Pos;
+        }
+    }
+    return Text;
+}
+
+std::string Negate(std::string Text)
+{
+    Text = Unwrap(Text);
+    if (Text.starts_with("not ") && (PrefixExpression(Text.substr(4)) || (Text[4] == '(' && Closing(Text, 4) == Text.size() - 1)))
+        return Unwrap(Text.substr(4));
+    return "not " + (PrefixExpression(Text) ? Text : "(" + Text + ")");
+}
+
+std::string CleanCondition(std::string Text)
+{
+    Text = Unwrap(CleanExpression(Text));
+    if (Text.starts_with("not "))
+    {
+        auto Operand = Text.substr(4);
+        if (!PrefixExpression(Operand) && !(Operand.starts_with('(') && Closing(Operand, 0) == Operand.size() - 1) &&
+            !Operand.starts_with("not "))
+            return Text;
+        auto Inner = Unwrap(Text.substr(4));
+        if (Inner.starts_with("not "))
+            return CleanCondition(Inner.substr(4));
+        // Equality negation is safe for metamethods and NaN; ordering negation is not.
+        unsigned Depth = 0;
+        char QuoteChar = 0;
+        for (std::size_t I = 0; I + 3 < Inner.size(); ++I)
+        {
+            char C = Inner[I];
+            if (QuoteChar)
+            {
+                if (C == '\\')
+                    ++I;
+                else if (C == QuoteChar)
+                    QuoteChar = 0;
+                continue;
+            }
+            if (C == '\'' || C == '"')
+            {
+                QuoteChar = C;
+                continue;
+            }
+            if (C == '(' || C == '[')
+                ++Depth;
+            else if (C == ')' || C == ']')
+                --Depth;
+            else if (!Depth && Inner.find(" and ") == std::string::npos && Inner.find(" or ") == std::string::npos &&
+                     (Inner.substr(I, 4) == " == " || Inner.substr(I, 4) == " ~= "))
+            {
+                Inner.replace(I, 4, Inner.substr(I, 4) == " == " ? " ~= " : " == ");
+                return Inner;
+            }
+        }
+        return Negate(Inner);
+    }
+    return Text;
+}
+
+// Locate operators outside nested expressions and string literals, preserving precedence.
+std::vector<std::string> SplitLogical(const std::string &Text, const std::string &Operator)
+{
+    unsigned Depth = 0;
+    char QuoteChar = 0;
+    std::size_t Start = 0;
+    std::vector<std::string> Parts;
+    for (std::size_t I = 0; I < Text.size(); ++I)
+    {
+        char C = Text[I];
+        if (QuoteChar)
+        {
+            if (C == '\\')
+                ++I;
+            else if (C == QuoteChar)
+                QuoteChar = 0;
+            continue;
+        }
+        if (C == '\'' || C == '"')
+        {
+            QuoteChar = C;
+            continue;
+        }
+        if (C == '(' || C == '[' || C == '{')
+            ++Depth;
+        else if (C == ')' || C == ']' || C == '}')
+            --Depth;
+        else if (!Depth && Text.compare(I, Operator.size(), Operator) == 0)
+        {
+            Parts.push_back(Text.substr(Start, I - Start));
+            I += Operator.size() - 1;
+            Start = I + 1;
+        }
+    }
+    Parts.push_back(Text.substr(Start));
+    return Parts;
+}
+
+std::string FormatCondition(std::string Text, unsigned ParentPrecedence = 0)
+{
+    Text = CleanCondition(Text);
+    if (Text.starts_with("if ") || Text.find('\n') != std::string::npos)
+        return Text;
+    for (unsigned Precedence = 1; Precedence <= 2; ++Precedence)
+    {
+        std::string Operator = Precedence == 1 ? " or " : " and ";
+        auto Parts = SplitLogical(Text, Operator);
+        if (Parts.size() == 1)
+            continue;
+        for (auto &Part : Parts)
+            Part = FormatCondition(Part, Precedence);
+        Text = Join(Parts, Operator);
+        return Precedence < ParentPrecedence ? "(" + Text + ")" : Text;
+    }
+    return Text;
 }
 
 enum class Kind
@@ -119,6 +340,7 @@ struct Statement
 struct Symbol
 {
     std::string Name;
+    std::string Base;
     bool Keep = false, Parameter = false, Cell = false;
     unsigned Owner = 0;
 };
@@ -139,6 +361,7 @@ class Function
 {
     Engine &E;
     const Prototype &P;
+    ControlFlow Flow;
     unsigned Id, Depth;
     std::vector<Upvalue> Upvalues;
     std::vector<unsigned> Registers;
@@ -157,6 +380,8 @@ class Function
     unsigned OpenExpressionBase = 0;
     std::string OpenHint;
     std::map<unsigned, std::string> Hints;
+    std::vector<unsigned> RegionVisits;
+    std::map<const std::vector<Statement> *, std::set<unsigned>> ScopedDeclarations;
     void BuildDataflow();
 
     unsigned SymbolAt(unsigned R, unsigned Pc, bool Write = false) const;
@@ -190,6 +415,8 @@ class Engine
     Result Output;
     std::vector<Symbol> Symbols;
     std::set<std::string> Names;
+    std::set<std::string> GlobalNames;
+    std::map<unsigned, std::set<unsigned>> Parents;
     std::size_t Work = 0;
     unsigned NextValue = 0;
 
@@ -207,6 +434,7 @@ class Engine
         for (const char *Name : {"game", "workspace", "script", "math", "string", "table", "coroutine", "vector", "integer", "getfenv",
                                  "setmetatable", "next", "type", "select", "error", "tonumber"})
             Names.insert(Name);
+        GlobalNames = Names;
     }
     unsigned New(std::string Name, unsigned Owner, bool Keep = false, bool Parameter = false, bool Cell = false)
     {
@@ -220,11 +448,56 @@ class Engine
             Name = Base + std::to_string(Suffix++);
         Names.insert(Name);
         unsigned Id = unsigned(Symbols.size());
-        Symbols.push_back({Name, Keep, Parameter, Cell, Owner});
+        Symbols.push_back({Name, Base, Keep, Parameter, Cell, Owner});
         return Id;
     }
-    std::string Resolve(std::string Text) const
+    std::string Resolve(std::string Text)
     {
+        auto References = Tokens(Text);
+        std::map<unsigned, std::vector<unsigned>> ByOwner;
+        std::set<unsigned> Seen;
+        for (auto Id : References)
+            if (Seen.insert(Id).second)
+                ByOwner[Symbols[Id].Owner].push_back(Id);
+        std::map<unsigned, std::set<std::string>> Used;
+        std::set<unsigned> Ready;
+        std::function<void(unsigned)> Allocate = [&](unsigned Owner)
+        {
+            if (!Ready.insert(Owner).second)
+                return;
+            auto &Taken = Used[Owner];
+            Taken = GlobalNames;
+            for (auto Parent : Parents[Owner])
+            {
+                Allocate(Parent);
+                Taken.insert(Used[Parent].begin(), Used[Parent].end());
+            }
+            unsigned Value = 1;
+            for (auto Id : ByOwner[Owner])
+            {
+                auto &S = Symbols[Id];
+                std::string Base = S.Base;
+                bool Generic = Base.starts_with("Value") && Base.size() > 5 &&
+                               std::all_of(Base.begin() + 5, Base.end(), [](unsigned char C) { return std::isdigit(C); });
+                if (Generic)
+                {
+                    do
+                    {
+                        S.Name = "Value" + std::to_string(Value++);
+                    } while (Taken.count(S.Name));
+                }
+                else
+                {
+                    S.Name = Base;
+                    unsigned Suffix = 2;
+                    while (Taken.count(S.Name))
+                        S.Name = Base + std::to_string(Suffix++);
+                }
+                Taken.insert(S.Name);
+            }
+        };
+        for (auto &[Owner, Ids] : ByOwner)
+            Allocate(Owner);
         for (auto Id : Tokens(Text))
             Replace(Text, Token(Id), Symbols.at(Id).Name);
         return Text;
@@ -238,7 +511,7 @@ class Engine
 };
 
 Function::Function(Engine &Owner, unsigned Proto, std::vector<Upvalue> Captures, unsigned Nesting)
-    : E(Owner), P(E.C.Prototypes.at(Proto)), Id(Proto), Depth(Nesting), Upvalues(std::move(Captures))
+    : E(Owner), P(E.C.Prototypes.at(Proto)), Flow(P), Id(Proto), Depth(Nesting), Upvalues(std::move(Captures))
 {
     if (Depth > 128)
         throw Error("Function nesting exceeds 128 levels");
@@ -374,7 +647,8 @@ void Function::BuildDataflow()
             }
             else
                 for (unsigned R = 0; R < P.Stack; ++R)
-                    Union(ReadSymbols[Next][R], State[R]);
+                    if (Flow.LiveIn[Next].test(R))
+                        Union(ReadSymbols[Next][R], State[R]);
         }
     }
     std::map<unsigned, unsigned> RootSymbol;
@@ -532,6 +806,7 @@ std::string Function::Signature() const
 std::string Function::Closure(const Instruction &I)
 {
     unsigned Child = I.Op == LOP_NEWCLOSURE ? P.Children.at(unsigned(I.D)) : P.Constants.at(unsigned(I.D)).Index;
+    E.Parents[Child].insert(Id);
     std::vector<Upvalue> Captures;
     std::vector<std::string> Arguments, Bindings;
     std::string Self;
@@ -591,6 +866,15 @@ std::string Function::Closure(const Instruction &I)
         Captures.push_back(std::move(U));
     }
     Function Nested(E, Child, std::move(Captures), Depth + 1);
+    auto Next = Index(I.Next);
+    if (!Nested.Parameters.empty() && E.C.Prototypes[Child].Locals.empty() && Next < P.Instructions.size())
+    {
+        const auto &Install = P.Instructions[Next];
+        if (Install.Op == LOP_SETTABLEKS && Install.A == I.A &&
+            std::any_of(Nested.P.Instructions.begin(), Nested.P.Instructions.end(), [](const auto &Code)
+                        { return Code.B == 0 && (Code.Op == LOP_NAMECALL || Code.Op == LOP_SETTABLEKS || Code.Op == LOP_GETTABLEKS); }))
+            E.Symbols[Nested.Parameters.front()].Base = "Self";
+    }
     std::string Body = Nested.Generate();
     std::string Text = "function" + Nested.Signature();
     if (E.Settings.IncludeLineComments)
@@ -701,6 +985,7 @@ void Function::Simple(const Instruction &I, std::vector<Statement> &Out)
         {
             auto Nice = E.New(Name, Id, Keep);
             E.Symbols[S].Name = E.Symbols[Nice].Name;
+            E.Symbols[S].Base = E.Symbols[Nice].Base;
             E.Symbols[S].Keep = Keep;
         }
     };
@@ -838,6 +1123,7 @@ void Function::Simple(const Instruction &I, std::vector<Statement> &Out)
         {
             unsigned Nice = E.New(E.C.Prototypes[Child].Name, Id, true);
             E.Symbols[S].Name = E.Symbols[Nice].Name;
+            E.Symbols[S].Base = E.Symbols[Nice].Base;
         }
         Set(Closure(I));
         break;
@@ -917,6 +1203,7 @@ void Function::Simple(const Instruction &I, std::vector<Statement> &Out)
                     {
                         auto New = E.New(P.Constants[unsigned(Arg.D)].Text, Id, true);
                         E.Symbols[S].Name = E.Symbols[New].Name;
+                        E.Symbols[S].Base = E.Symbols[New].Base;
                         E.Symbols[S].Keep = true;
                     }
                 }
@@ -1107,15 +1394,20 @@ std::vector<Statement> Function::Region(unsigned Start, unsigned End, int BreakT
         throw Unstructured("control-flow nesting too deep");
     std::vector<Statement> Out;
     unsigned Pos = Index(Start), Limit = Index(End);
-    while (Pos < Limit)
+    while (Pos != Limit && Pos < P.Instructions.size())
     {
+        if (RegionVisits.empty())
+            RegionVisits.resize(P.Instructions.size());
+        if (++RegionVisits[Pos] > 12)
+            throw Unstructured("shared region exceeds duplication budget");
         const auto &I = P.Instructions[Pos];
         // A backedge to this instruction defines a while/repeat region. Choose the outermost backedge.
         if (!IgnoreBackedge)
         {
             int Back = -1;
             for (unsigned J = Pos + 1; J < Limit; ++J)
-                if (P.Instructions[J].Target() == int(I.Pc) && (Jump(P.Instructions[J].Op) || Conditional(P.Instructions[J].Op)))
+                if (P.Instructions[J].Target() == int(I.Pc) && Flow.Dominates(Pos, J) &&
+                    (Jump(P.Instructions[J].Op) || Conditional(P.Instructions[J].Op)))
                     Back = int(J);
             if (Back >= 0)
             {
@@ -1205,26 +1497,35 @@ std::vector<Statement> Function::Region(unsigned Start, unsigned End, int BreakT
                 Branch.Body.push_back({Kind::Continue});
             else
             {
-                if (Target <= int(I.Pc) || Target > int(End))
+                if (Target <= int(I.Pc))
                     throw Unstructured("conditional crosses region");
-                unsigned ElseIndex = Index(unsigned(Target));
-                int JoinPc = Target;
-                unsigned ThenEnd = unsigned(Target);
-                if (ElseIndex > Pos + 1)
+                // The lexical false arm is also a valid continuation when paths in the first
+                // arm terminate early. A strict postdominator would move that continuation to
+                // the function exit and duplicate the remainder of the function.
+                unsigned JoinPc = unsigned(Target);
+                for (unsigned Scan = Pos + 1; Scan < Index(std::min(JoinPc, End)); ++Scan)
                 {
-                    const auto &BeforeElse = P.Instructions[ElseIndex - 1];
-                    if (Jump(BeforeElse.Op) && BeforeElse.Target() > Target && BeforeElse.Target() <= int(End))
-                    {
-                        JoinPc = BeforeElse.Target();
-                        ThenEnd = BeforeElse.Pc;
-                    }
+                    const auto &Edge = P.Instructions[Scan];
+                    if (Edge.Target() <= Target || Edge.Target() == BreakTarget || Edge.Target() == ContinueTarget)
+                        continue;
+                    const auto &Destination = P.Instructions[Index(unsigned(Edge.Target()))];
+                    if (Destination.Op == LOP_RETURN)
+                        continue;
+                    JoinPc = std::max(JoinPc, unsigned(Edge.Target()));
                 }
+                int Post = Flow.PostDominators[Pos];
+                if (Post >= 0 && unsigned(Post) < P.Instructions.size())
+                    JoinPc = std::min(JoinPc, P.Instructions[unsigned(Post)].Pc);
+                JoinPc = std::min(JoinPc, End);
+                if (JoinPc <= I.Pc)
+                    throw Unstructured("branch rejoins a loop header at " + std::to_string(I.Pc) + " -> " + std::to_string(JoinPc) +
+                                       " end " + std::to_string(End));
                 Branch.Text = "not (" + Branch.Text + ")";
-                Branch.Body = Region(I.Next, ThenEnd, BreakTarget, ContinueTarget, Level + 1);
-                if (JoinPc != Target)
-                    Branch.Else = Region(unsigned(Target), unsigned(JoinPc), BreakTarget, ContinueTarget, Level + 1);
+                Branch.Body = Region(I.Next, JoinPc, BreakTarget, ContinueTarget, Level + 1);
+                if (JoinPc != unsigned(Target))
+                    Branch.Else = Region(unsigned(Target), JoinPc, BreakTarget, ContinueTarget, Level + 1);
                 Out.push_back(std::move(Branch));
-                Pos = Index(unsigned(JoinPc));
+                Pos = Index(JoinPc);
                 continue;
             }
             Out.push_back(std::move(Branch));
@@ -1246,7 +1547,7 @@ std::vector<Statement> Function::Region(unsigned Start, unsigned End, int BreakT
                 Out.push_back({Kind::Continue});
                 break;
             }
-            if (Target < int(I.Next) || Target > int(End))
+            if (Target < int(I.Next))
                 throw Unstructured("jump crosses region");
             // CMPPROTO's generic fallback is always valid, independent of runtime-specific proto ids.
             Pos = Index(unsigned(Target));
@@ -1370,6 +1671,97 @@ std::vector<Statement> Function::StateMachine()
 
 void Function::Optimize(std::vector<Statement> &Nodes)
 {
+    std::function<bool(const Statement &, const Statement &)> Equal = [&](const auto &A, const auto &B)
+    {
+        return A.Type == B.Type && A.Left == B.Left && A.Text == B.Text && A.Body.size() == B.Body.size() &&
+               A.Else.size() == B.Else.size() && std::equal(A.Body.begin(), A.Body.end(), B.Body.begin(), Equal) &&
+               std::equal(A.Else.begin(), A.Else.end(), B.Else.begin(), Equal);
+    };
+    auto Same = [&](const auto &A, const auto &B) { return A.size() == B.size() && std::equal(A.begin(), A.end(), B.begin(), Equal); };
+    std::function<void(std::vector<Statement> &)> Structure = [&](auto &List)
+    {
+        for (auto &S : List)
+        {
+            Structure(S.Body);
+            Structure(S.Else);
+            if (S.Type != Kind::If)
+                continue;
+            S.Text = CleanCondition(S.Text);
+            if (S.Body.empty() && !S.Else.empty())
+            {
+                S.Text = CleanCondition(Negate(S.Text));
+                S.Body.swap(S.Else);
+            }
+            if (S.Body.size() == 1 && S.Body[0].Type == Kind::If && Same(S.Else, S.Body[0].Else))
+            {
+                auto Inner = std::move(S.Body[0]);
+                S.Text = "(" + S.Text + ") and (" + Inner.Text + ")";
+                S.Body = std::move(Inner.Body);
+            }
+            if (S.Body.size() == 1 && S.Body[0].Type == Kind::If && !S.Else.empty())
+            {
+                S.Text = CleanCondition(Negate(S.Text));
+                S.Body.swap(S.Else);
+            }
+            if (S.Else.size() == 1 && S.Else[0].Type == Kind::If && Same(S.Body, S.Else[0].Body))
+            {
+                auto Inner = std::move(S.Else[0]);
+                S.Text = "(" + S.Text + ") or (" + Inner.Text + ")";
+                S.Else = std::move(Inner.Else);
+            }
+        }
+        for (std::size_t N = 0; N < List.size(); ++N)
+        {
+            auto &S = List[N];
+            if (S.Type != Kind::If)
+                continue;
+            std::vector<Statement> Tail;
+            while (!S.Body.empty() && !S.Else.empty() && Equal(S.Body.back(), S.Else.back()))
+            {
+                Tail.push_back(std::move(S.Body.back()));
+                S.Body.pop_back();
+                S.Else.pop_back();
+            }
+            if (!Tail.empty())
+            {
+                std::reverse(Tail.begin(), Tail.end());
+                List.insert(List.begin() + std::ptrdiff_t(N + 1), Tail.begin(), Tail.end());
+            }
+        }
+        for (std::size_t N = 0; N < List.size(); ++N)
+        {
+            auto &S = List[N];
+            if (S.Type != Kind::If || S.Body.size() != 1 || S.Body[0].Type != Kind::Assign || S.Body[0].Left.size() != 1)
+                continue;
+            auto U = S.Body[0].Left[0];
+            if (S.Else.empty() && N && List[N - 1].Type == Kind::Assign && List[N - 1].Left == S.Body[0].Left &&
+                S.Body[0].Text.find(Token(U)) == std::string::npos)
+            {
+                auto Test = CleanCondition(S.Text);
+                if (Test == Token(U) || Test == "not " + Token(U))
+                {
+                    auto &Previous = List[N - 1];
+                    Previous.Text =
+                        "(" + Unwrap(Previous.Text) + ")" + (Test == Token(U) ? " and " : " or ") + "(" + Unwrap(S.Body[0].Text) + ")";
+                    Previous.Pure = false;
+                    Previous.Call = false;
+                    List.erase(List.begin() + std::ptrdiff_t(N--));
+                    continue;
+                }
+            }
+            if (S.Else.size() == 1 && S.Else[0].Type == Kind::Assign && S.Else[0].Left == S.Body[0].Left &&
+                (S.Else[0].Text == "false" || S.Else[0].Text == "nil" || S.Body[0].Text == "false" || S.Body[0].Text == "nil") &&
+                S.Body[0].Text.find('\n') == std::string::npos && S.Else[0].Text.find('\n') == std::string::npos)
+            {
+                Statement Value = S.Body[0];
+                Value.Text = "(if " + CleanCondition(S.Text) + " then " + Unwrap(Value.Text) + " else " + Unwrap(S.Else[0].Text) + ")";
+                Value.Pure = false;
+                Value.Call = false;
+                S = std::move(Value);
+            }
+        }
+    };
+    Structure(Nodes);
     std::unordered_map<unsigned, unsigned> Reads, WritesCount;
     std::function<void(const std::vector<Statement> &)> Count = [&](const auto &List)
     {
@@ -1394,6 +1786,42 @@ void Function::Optimize(std::vector<Statement> &Nodes)
         for (std::size_t N = 0; N < Nodes.size();)
         {
             auto &S = Nodes[N];
+            if (S.Type == Kind::Assign && S.Left.size() == 3 && N + 1 < Nodes.size() && Nodes[N + 1].Type == Kind::For)
+            {
+                auto &Loop = Nodes[N + 1];
+                std::vector<std::string> Vars;
+                bool Once = true;
+                for (auto U : S.Left)
+                {
+                    Vars.push_back(Token(U));
+                    Once &= Reads[U] == 1 && WritesCount[U] == 1;
+                }
+                auto Suffix = " in " + Join(Vars);
+                if (Once && Loop.Text.ends_with(Suffix))
+                {
+                    Loop.Text.replace(Loop.Text.size() - Suffix.size(), Suffix.size(), " in " + S.Text);
+                    Nodes.erase(Nodes.begin() + std::ptrdiff_t(N));
+                    continue;
+                }
+            }
+            // Recover a method declaration from the closure and its table installation.
+            if (S.Type == Kind::Assign && S.Left.size() == 1 && S.Text.starts_with("function(") && Reads[S.Left[0]] == 1 &&
+                N + 1 < Nodes.size() && Nodes[N + 1].Type == Kind::Raw)
+            {
+                auto &Next = Nodes[N + 1];
+                auto Suffix = " = " + Token(S.Left[0]);
+                if (Next.Text.ends_with(Suffix))
+                {
+                    auto Target = Next.Text.substr(0, Next.Text.size() - Suffix.size());
+                    if (Target.find('.') != std::string::npos && Target.find('[') == std::string::npos && PrefixExpression(Target))
+                    {
+                        S.Text = "function " + Target + S.Text.substr(8);
+                        S.Type = Kind::Function;
+                        S.Left.clear();
+                        Nodes.erase(Nodes.begin() + std::ptrdiff_t(N + 1));
+                    }
+                }
+            }
             if (S.Type == Kind::Assign && S.Left.size() == 1 && !E.Symbols[S.Left[0]].Keep && WritesCount[S.Left[0]] == 1)
             {
                 auto Id = S.Left[0];
@@ -1422,8 +1850,8 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                                 auto Replacement = S.Text;
                                 auto Position = Nodes[J].Text.find(Token(Id)) + Token(Id).size();
                                 if (Position < Nodes[J].Text.size() &&
-                                    std::string(".:[").find(Nodes[J].Text[Position]) != std::string::npos && !Atomic(Replacement) &&
-                                    (Replacement.empty() || Replacement.front() != '('))
+                                    std::string(".:[").find(Nodes[J].Text[Position]) != std::string::npos &&
+                                    !PrefixExpression(Replacement) && (Replacement.empty() || Replacement.front() != '('))
                                     Replacement = "(" + Replacement + ")";
                                 Replace(Nodes[J].Text, Token(Id), Replacement);
                                 Nodes.erase(Nodes.begin() + std::ptrdiff_t(N));
@@ -1450,6 +1878,17 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                         if (E.Symbols[Dependency].Cell)
                             CanReorder = false;
                     bool Ordered = CanReorder || BeforeUse.find_first_of(")[.:+-*/%^#") == std::string::npos;
+                    auto PrefixSymbols = Tokens(BeforeUse);
+                    if (PrefixSymbols.size() == 1 && !E.Symbols[PrefixSymbols[0]].Cell && BeforeUse.starts_with(Token(PrefixSymbols[0])))
+                    {
+                        auto Tail = BeforeUse.substr(Token(PrefixSymbols[0]).size());
+                        // Assigning a constant field on a stable local has no effect before the RHS is evaluated.
+                        if (Tail.starts_with('.') && Tail.ends_with(" = ") && Identifier(Tail.substr(1, Tail.size() - 4)))
+                            Ordered = true;
+                        // Luau evaluates method arguments before NAMECALL; the receiver here is already a stable local.
+                        if (Tail.starts_with(':') && Tail.ends_with('(') && Identifier(Tail.substr(1, Tail.size() - 2)))
+                            Ordered = true;
+                    }
                     // Adjacent substitution cannot cross a side effect. Do not change a call's arity by inlining a multi-result call.
                     if (Ordered && std::count(Uses.begin(), Uses.end(), Id) == 1 && Next.Type != Kind::While && Next.Type != Kind::Repeat &&
                         Next.Type != Kind::Function)
@@ -1459,7 +1898,7 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                             Replacement = "(" + Replacement + ")";
                         auto Position = Next.Text.find(Token(Id)) + Token(Id).size();
                         if (Position < Next.Text.size() && std::string(".:[").find(Next.Text[Position]) != std::string::npos &&
-                            !Atomic(Replacement) && (Replacement.empty() || Replacement.front() != '('))
+                            !PrefixExpression(Replacement) && (Replacement.empty() || Replacement.front() != '('))
                             Replacement = "(" + Replacement + ")";
                         Replace(Next.Text, Token(Id), Replacement);
                         Next.Pure = Next.Pure && S.Pure;
@@ -1529,13 +1968,6 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
     std::string Pad(Indent * E.Settings.IndentWidth, ' ');
     auto Line = [&](const std::string &Text)
     {
-        // A statement beginning with '(' can otherwise attach to the previous call in Luau's grammar.
-        if (!Text.empty() && Text.front() == '(' && !Out.empty())
-        {
-            auto End = Out.find_last_not_of("\n ");
-            if (End != std::string::npos && Out[End] != ';')
-                Out.insert(End + 1, ";");
-        }
         std::size_t Start = 0;
         do
         {
@@ -1546,10 +1978,19 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
             Start = End + 1;
         } while (Start < Text.size());
     };
+    if (auto Found = ScopedDeclarations.find(&Nodes); Found != ScopedDeclarations.end())
+    {
+        std::vector<std::string> Names;
+        for (auto Id : Found->second)
+            if (Declared.insert(Id).second)
+                Names.push_back(Token(Id));
+        if (!Names.empty())
+            Line("local " + Join(Names));
+    }
     for (std::size_t N = 0; N < Nodes.size(); ++N)
     {
         const auto &S = Nodes[N];
-        bool Block = !S.Body.empty() || S.Text.find("function(") != std::string::npos;
+        bool Block = !S.Body.empty() || S.Type == Kind::Function || S.Text.find("function(") != std::string::npos;
         if (Block && !Out.empty() && !Out.ends_with("\n\n"))
             Out += '\n';
         switch (S.Type)
@@ -1572,16 +2013,30 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
                 Line(FunctionText);
             }
             else
-                Line((AllNew ? "local " : "") + Join(Names) + " = " + S.Text);
+                Line((AllNew ? "local " : "") + Join(Names) + " = " + CleanExpression(S.Left.size() == 1 ? Unwrap(S.Text) : S.Text));
             for (auto Id : S.Left)
                 Declared.insert(Id);
             break;
         }
         case Kind::Raw:
+        {
+            auto Text = CleanExpression(S.Text);
+            // A lexical block separates a parenthesized call without a statement semicolon.
+            if (Text.starts_with('('))
+            {
+                Line("do");
+                Line(std::string(E.Settings.IndentWidth, ' ') + Text);
+                Line("end");
+            }
+            else
+                Line(Text);
+            break;
+        }
+        case Kind::Function:
             Line(S.Text);
             break;
         case Kind::Return:
-            Line(S.Text.empty() ? "return" : "return " + S.Text);
+            Line(S.Text.empty() ? "return" : "return " + CleanExpression(S.Text));
             break;
         case Kind::Break:
             Line("break");
@@ -1595,9 +2050,21 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
         case Kind::For:
         {
             if (S.Type == Kind::If)
-                Line("if " + S.Text + " then");
+            {
+                auto Test = FormatCondition(S.Text);
+                if (Test.size() + Pad.size() > 110)
+                    for (const auto *Operator : {" or ", " and "})
+                    {
+                        auto Parts = SplitLogical(Test, Operator);
+                        if (Parts.size() < 2)
+                            continue;
+                        Test = Join(Parts, "\n" + std::string(E.Settings.IndentWidth, ' ') + std::string(Operator).substr(1));
+                        break;
+                    }
+                Line("if " + Test + " then");
+            }
             if (S.Type == Kind::While)
-                Line("while " + S.Text + " do");
+                Line("while " + FormatCondition(S.Text) + " do");
             if (S.Type == Kind::Repeat)
                 Line("repeat");
             if (S.Type == Kind::For)
@@ -1608,11 +2075,18 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
             Out += Render(S.Body, Indent + 1, InnerDeclared, Hoist);
             if (!S.Else.empty())
             {
-                Line("else");
                 InnerDeclared = Declared;
+                if (S.Type == Kind::If && S.Else.size() == 1 && S.Else.front().Type == Kind::If && ScopedDeclarations[&S.Else].empty())
+                {
+                    auto ElseText = Render(S.Else, Indent, InnerDeclared, Hoist);
+                    ElseText.replace(Pad.size(), 2, "elseif");
+                    Out += ElseText;
+                    break; // The flattened elseif already supplies the final end.
+                }
+                Line("else");
                 Out += Render(S.Else, Indent + 1, InnerDeclared, Hoist);
             }
-            Line(S.Type == Kind::Repeat ? "until " + S.Text : "end");
+            Line(S.Type == Kind::Repeat ? "until " + FormatCondition(S.Text) : "end");
             break;
         }
         default:
@@ -1640,42 +2114,81 @@ std::string Function::Generate(bool Main)
         E.Output.StateMachineFunctions++;
         Nodes = StateMachine();
     }
-    Optimize(Nodes);
+    for (unsigned Pass = 0; Pass < 5; ++Pass)
+        Optimize(Nodes);
     // Remove the compiler's implicit empty return at the end of a chunk/function.
     if (!Nodes.empty() && Nodes.back().Type == Kind::Return && Nodes.back().Text.empty())
         Nodes.pop_back();
 
-    std::set<unsigned> Referenced, Assigned, NestedAssigned, TopAssigned, ReadBeforeWrite;
-    std::function<void(const std::vector<Statement> &, unsigned)> Inspect = [&](const auto &List, unsigned Level)
+    using Scope = const std::vector<Statement> *;
+    std::map<unsigned, std::vector<Scope>> Occurrences;
+    std::set<unsigned> Referenced;
+    std::vector<Scope> Path;
+    auto Occur = [&](unsigned U)
     {
+        Referenced.insert(U);
+        auto [It, Inserted] = Occurrences.emplace(U, Path);
+        if (!Inserted)
+        {
+            auto &Common = It->second;
+            std::size_t N = 0;
+            while (N < Common.size() && N < Path.size() && Common[N] == Path[N])
+                ++N;
+            Common.resize(N);
+        }
+    };
+    std::function<void(const std::vector<Statement> &)> Inspect = [&](const auto &List)
+    {
+        Path.push_back(&List);
         for (const auto &S : List)
         {
             for (auto U : Tokens(S.Text))
-            {
-                Referenced.insert(U);
-                if (!Assigned.count(U))
-                    ReadBeforeWrite.insert(U);
-            }
+                Occur(U);
             for (auto U : S.Left)
-            {
-                Assigned.insert(U);
-                Referenced.insert(U);
-                (Level ? NestedAssigned : TopAssigned).insert(U);
-            }
-            Inspect(S.Body, Level + 1);
-            Inspect(S.Else, Level + 1);
+                Occur(U);
+            Inspect(S.Body);
+            Inspect(S.Else);
         }
+        Path.pop_back();
     };
-    Inspect(Nodes, 0);
+    Inspect(Nodes);
+    std::function<bool(const Statement &, unsigned)> Contains = [&](const auto &S, unsigned U)
+    {
+        if (S.Text.find(Token(U)) != std::string::npos || std::find(S.Left.begin(), S.Left.end(), U) != S.Left.end())
+            return true;
+        for (const auto &Child : S.Body)
+            if (Contains(Child, U))
+                return true;
+        for (const auto &Child : S.Else)
+            if (Contains(Child, U))
+                return true;
+        return false;
+    };
     std::set<unsigned> Hoist, Declared;
     for (auto U : Parameters)
         Declared.insert(U);
     for (auto U : Referenced)
     {
         const auto &S = E.Symbols[U];
-        if (S.Owner == Id && !S.Parameter && (NestedAssigned.count(U) || ReadBeforeWrite.count(U) || S.Cell))
+        if (S.Owner != Id || S.Parameter)
+            continue;
+        if (S.Cell)
+        {
             Hoist.insert(U);
+            continue;
+        }
+        const auto *Scope = Occurrences[U].back();
+        for (const auto &First : *Scope)
+        {
+            if (!Contains(First, U))
+                continue;
+            bool Defines = std::find(First.Left.begin(), First.Left.end(), U) != First.Left.end();
+            if (!(Defines && (First.Type == Kind::For || (First.Type == Kind::Assign && First.Text.find(Token(U)) == std::string::npos))))
+                ScopedDeclarations[Scope].insert(U);
+            break;
+        }
     }
+    Hoist.insert(ScopedDeclarations[&Nodes].begin(), ScopedDeclarations[&Nodes].end());
     if (Dispatch)
         for (auto U : Registers)
             if (Referenced.count(U) && !E.Symbols[U].Parameter)
@@ -1686,7 +2199,8 @@ std::string Function::Generate(bool Main)
     {
         Out += Pad + "--[[\n";
         for (unsigned J = 0; J < Upvalues.size(); ++J)
-            Out += Pad + std::string(E.Settings.IndentWidth, ' ') + std::to_string(J + 1) + ": " + Upvalues[J].Name + " (type \"" +
+            Out += Pad + std::string(E.Settings.IndentWidth, ' ') + std::to_string(J + 1) + ": " +
+                   (Tokens(Upvalues[J].Value).empty() ? Upvalues[J].Name : Token(Tokens(Upvalues[J].Value).front())) + " (type \"" +
                    (Upvalues[J].Reference ? "Reference" : "Copy") + "\")\n";
         Out += Pad + "]]\n\n";
     }

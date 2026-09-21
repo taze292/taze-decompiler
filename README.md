@@ -74,7 +74,9 @@ local function ServiceNames() -- Line: 4
 end
 ```
 
-Global names, table fields, and method names retain their original spelling, because changing them would change program behavior. Generated locals and function bindings use PascalCase and avoid collisions with globals. A missing line number is reported as `Unknown`. Comments, type annotations, and names erased by the compiler cannot be recovered exactly.
+Global names, table fields, and method names retain their original spelling, because changing them would change program behavior. Generated locals and function bindings use PascalCase and avoid collisions with globals and enclosing locals. Names are allocated after optimization, so eliminated temporaries do not leave names such as `Value438` or unnecessary suffixes on imported modules. Unknown locals use compact `Value1`, `Value2`, etc. A missing line number is reported as `Unknown`. Comments, type annotations, and names erased by the compiler cannot be recovered exactly.
+
+Generated statements have no semicolons. Parenthesized call statements use a `do` block where needed to avoid Luau's ambiguous statement boundary; literal string contents remain intact. The formatter keeps blank lines around function/control-flow blocks and wraps long boolean conditions.
 
 ## C++ API
 
@@ -96,7 +98,9 @@ Taze::Result Result = Taze::Decompile(BytecodeString, Options);
 
 The reader supports serialized versions **3–14**, type metadata 1–3, and parses the experimental version-100 envelope. Execution tests cover compiler-produced versions **9, 11, 12, 13, and 14**, including Roblox opcode encoding. Older reader branches are not backed by historical compiler binaries in this repository.
 
-Implemented reconstruction includes arithmetic, comparisons, short-circuit control flow, imports, table/member operations, method calls, fixed and open return tuples, varargs, closures, copy/reference captures, upvalue closing, numeric/generic loops, and fastcall fallback paths. Register dataflow separates reused temporary slots and merges values at control-flow joins. Copy snapshots and reference cells preserve captured lifetimes. Integer constants use `integer.fromstring`; vector constants use `vector.create`, so those outputs require the corresponding target-runtime libraries.
+Implemented reconstruction includes arithmetic, comparisons, short-circuit control flow, imports, table/member operations, method calls, fixed and open return tuples, varargs, closures, copy/reference captures, upvalue closing, numeric/generic loops, and fastcall fallback paths. Register dataflow separates reused temporary slots and merges live values at control-flow joins. Copy snapshots and reference cells preserve captured lifetimes. Integer constants use `integer.fromstring`; vector constants use `vector.create`, so those outputs require the corresponding target-runtime libraries.
+
+Control-flow structuring builds a successor/predecessor graph and computes dominators, postdominators, and register liveness. Natural loops and branch continuations become ordinary Luau blocks. Early returns retain their lexical continuation instead of duplicating the remainder of the function. Subsequent passes combine shared branches, recover short-circuit expressions and `elseif` chains, fold iterator setup into `for`, and place local declarations in the smallest shared scope. These transformations use bytecode information; the user-supplied CameraModule source is only a local comparison fixture.
 
 The tests compile source, decompile it, recompile the result, and compare returned values in the Luau VM. They exercise optimization levels 0–2, debug levels 0/2, normal and forced state-machine output, mutable captures, nested loops, recursion, yielding, nil-containing tuples, metamethods, and evaluation order. Additional checks cover versioned serialization, encoded opcodes, trailers, malformed headers, and every truncated prefix of a valid fixture.
 
@@ -108,7 +112,7 @@ Tested against client **0.739.0.7390687** using the specifically selected script
 getscriptbytecode(game.Players.LocalPlayer.PlayerScripts.PlayerModule.CameraModule)
 ```
 
-The captured module contains **13,117 bytes**, bytecode version **12**, type version **3**, and **32 prototypes**. Its decompiled output compiled successfully both locally and through Roblox's `loadstring`. Six functions use the explicit state-machine fallback. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
+The captured module contains **13,117 bytes**, bytecode version **12**, type version **3**, and **32 prototypes**. Its decompiled output compiled successfully both locally and through Roblox's `loadstring`. All 32 prototypes now reconstruct without state-machine fallback. The output decreased from **92,557 to 25,048 bytes** (about **73% smaller**) while retaining the configured function/upvalue comments. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
 
 CameraModule itself was **compiled, not executed or substituted for the running camera controller**. A successful compilation does not establish full behavioral equivalence for that module. Extracted bytecode, generated CameraModule source, and test harnesses live in the ignored `artifacts/` directory.
 

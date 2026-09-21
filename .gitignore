@@ -3,6 +3,8 @@
 /build*/
 /out/
 /artifacts/
+# User-supplied comparison source, kept locally for decompiler validation.
+/CameraModule.luau
 *.obj
 *.pdb
 *.ilk
