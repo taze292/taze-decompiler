@@ -92,6 +92,7 @@ try {
     Check $Ready 'Server did not become ready'
     $Small = Fixture 'small' 'return 37, "hello", nil'
     $Large = Fixture 'large' ('return "' + ('a' * 70000) + '"')
+    $Module = Fixture 'module' 'local M={}; function M.Read() return 17 end; return M'
     $Socket = Connect-Bridge
     Send-Text $Socket ("1`n" + $Small.Hex)
     Check ((Receive-Text $Socket) -ceq ("1`nok`n" + $Small.Source)) 'WebSocket output differs from CLI output'
@@ -103,6 +104,17 @@ try {
     Check ((Receive-Text $Socket).StartsWith("3`nerror`n")) 'Invalid hex should return a request error'
     Send-Text $Socket "4`n00"
     Check ((Receive-Text $Socket).StartsWith("4`nerror`n")) 'Invalid bytecode should return a request error'
+    $ModulePath = 'game.ReplicatedStorage.Test'
+    $PathHex = [BitConverter]::ToString([Text.Encoding]::ASCII.GetBytes($ModulePath)).Replace('-', '')
+    Send-Text $Socket ("40`nTAZE2`nStartLine`n$PathHex`n" + $Module.Hex)
+    $Reply = Receive-Text $Socket
+    Check ($Reply.StartsWith("40`nok`n") -and $Reply.Contains(' | require(game.ReplicatedStorage.Test).Read')) 'Module metadata was not applied'
+    Send-Text $Socket ("41`nTAZE2`nStartLine`n`n" + $Module.Hex)
+    Check ((Receive-Text $Socket).Contains('filtergc("function", { StartLine =')) 'StartLine metadata was not applied'
+    Send-Text $Socket ("42`nTAZE2`nWrongField`n`n" + $Module.Hex)
+    Check ((Receive-Text $Socket).StartsWith("42`nerror`n")) 'Unknown line field was accepted'
+    Send-Text $Socket ("43`nTAZE2`nLine`n0a`n" + $Module.Hex)
+    Check ((Receive-Text $Socket).StartsWith("43`nerror`n")) 'Multiline module-path injection was accepted'
     Send-Text $Socket ("5`n" + $Large.Hex)
     Check ((Receive-Text $Socket) -ceq ("5`nok`n" + $Large.Source)) '64-bit frame length or large response failed'
     $Other = Connect-Bridge

@@ -15,6 +15,96 @@ assert(type(Connect) == "function", "Taze requires WebSocket.connect, websocket.
 local Previous = Environment.TazeBridge
 local Original = if Previous and Previous.Marker == "TazeBridge1" then Previous.Original else Environment.decompile or decompile
 local Bridge = { Marker = "TazeBridge1", Original = Original, Url = Url, Connected = false }
+
+local function DetectLineField()
+    local Filter = filtergc or Environment.filtergc
+    if type(Filter) ~= "function" or type(debug.info) ~= "function" then
+        return "Line", "fallback"
+    end
+
+    local function TazeLineProbe()
+        return "TazeBridge.LineProbe.20260921"
+    end
+
+    local Ok, Line = pcall(debug.info, TazeLineProbe, "l")
+    if not Ok or type(Line) ~= "number" or Line < 1 then
+        return "Line", "fallback"
+    end
+
+    local function ContainsProbe(Field, Value)
+        local Options = {
+            Constants = { "TazeBridge.LineProbe.20260921" },
+            IgnoreExecutor = false,
+            IgnoreSyn = false,
+        }
+        Options[Field] = Value
+
+        local Success, Matches = pcall(Filter, "function", Options, false)
+        if not Success then
+            return nil
+        end
+        if type(Matches) == "function" then
+            return Matches == TazeLineProbe
+        end
+        if type(Matches) == "table" then
+            for _, Match in Matches do
+                if Match == TazeLineProbe then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    for _, Field in { "StartLine", "Line" } do
+        -- The negative control rejects executors that silently ignore an unknown option.
+        if ContainsProbe(Field, Line) == true and ContainsProbe(Field, Line + 1000000) == false then
+            return Field, "verified"
+        end
+    end
+    return "Line", "fallback"
+end
+
+Bridge.FilterLineField, Bridge.LineProbe = DetectLineField()
+
+local function QuoteName(Name)
+    return '"' .. Name:gsub(".", function(Character)
+        local Byte = string.byte(Character)
+        if Character == '"' or Character == "\\" then
+            return "\\" .. Character
+        elseif Byte < 32 or Byte >= 127 then
+            return string.format("\\%03d", Byte)
+        end
+        return Character
+    end) .. '"'
+end
+
+local function ModulePath(Target)
+    if not Target:IsA("ModuleScript") then
+        return ""
+    end
+
+    local Parts = {}
+    local Current = Target
+    local LocalPlayer = game:GetService("Players").LocalPlayer
+    local Base = "game"
+    while Current ~= game do
+        if Current == LocalPlayer then
+            Base = 'game:GetService("Players").LocalPlayer'
+            break
+        end
+        local Parent = Current.Parent
+        if not Parent or #Parts >= 128 or Parent:FindFirstChild(Current.Name) ~= Current then
+            return ""
+        end
+        table.insert(Parts, ':FindFirstChild(' .. QuoteName(Current.Name) .. ')')
+        Current = Parent
+    end
+    for Index = #Parts, 1, -1 do
+        Base ..= Parts[Index]
+    end
+    return if #Base <= 8192 then Base else ""
+end
 local Socket
 local Connections = {}
 local Pending = {}
@@ -123,13 +213,14 @@ Installed = function(Target, Timeout)
     assert(type(Bytecode) == "string" and #Bytecode > 0, "getscriptbytecode returned no bytecode for this script")
     assert(#Bytecode <= 64 * 1024 * 1024, "Bytecode exceeds the 64 MiB limit")
     local Encoded = Bytecode:gsub(".", Hex)
+    local Path = ModulePath(Target):gsub(".", Hex)
     assert(os.clock() < Deadline, "Taze timed out while reading bytecode")
     NextId += 1
     local Id = tostring(NextId)
     local Request = {}
     Pending[Id] = Request
     local Sent, SendError = pcall(function()
-        Current:Send(Id .. "\n" .. Encoded)
+        Current:Send(Id .. "\nTAZE2\n" .. Bridge.FilterLineField .. "\n" .. Path .. "\n" .. Encoded)
     end)
     if not Sent then
         Pending[Id] = nil

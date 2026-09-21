@@ -1,10 +1,12 @@
 #include "Bytecode.hpp"
 #include "ControlFlow.hpp"
+#include "Exports.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <queue>
 #include <set>
@@ -344,6 +346,7 @@ struct Symbol
     std::string Base;
     bool Keep = false, Parameter = false, Cell = false;
     unsigned Owner = 0;
+    bool ReferenceAlias = false;
 };
 struct Upvalue
 {
@@ -364,6 +367,7 @@ class Function
     const Prototype &P;
     ControlFlow Flow;
     unsigned Id, Depth;
+    unsigned ExportFrame = std::numeric_limits<unsigned>::max();
     std::vector<Upvalue> Upvalues;
     std::vector<unsigned> Registers;
     std::vector<unsigned> LocalSymbols;
@@ -398,7 +402,7 @@ class Function
     std::vector<Statement> Region(unsigned Start, unsigned End, int BreakTarget = -1, int ContinueTarget = -1, unsigned Level = 0,
                                   bool IgnoreBackedge = false);
     std::vector<Statement> StateMachine();
-    std::string Closure(const Instruction &I);
+    std::string Closure(const Instruction &I, std::vector<Statement> &Out);
     unsigned Index(unsigned Pc) const;
     void Optimize(std::vector<Statement> &Nodes);
     std::string Render(const std::vector<Statement> &Nodes, unsigned Indent, std::set<unsigned> &Declared, const std::set<unsigned> &Hoist);
@@ -419,6 +423,9 @@ class Engine
     std::set<std::string> Names;
     std::set<std::string> GlobalNames;
     std::map<unsigned, std::set<unsigned>> Parents;
+    Exports ExportGraph;
+    unsigned MainExportFrame = std::numeric_limits<unsigned>::max();
+    std::map<unsigned, std::string> Locators;
     std::size_t Work = 0;
     unsigned NextValue = 0;
 
@@ -455,6 +462,13 @@ class Engine
     }
     std::string Resolve(std::string Text)
     {
+        auto Paths = Settings.ModulePath.empty() ? std::map<unsigned, std::string>{} : ExportGraph.Find(MainExportFrame);
+        for (const auto &[Proto, Fallback] : Locators)
+        {
+            auto It = Paths.find(Proto);
+            auto Lookup = It == Paths.end() ? Fallback : "require(" + Settings.ModulePath + ")" + It->second;
+            Replace(Text, "\x1d" + std::to_string(Proto) + "\x1c", Lookup);
+        }
         auto References = Tokens(Text);
         std::map<unsigned, std::vector<unsigned>> ByOwner;
         std::set<unsigned> Seen;
@@ -568,6 +582,18 @@ Function::Function(Engine &Owner, unsigned Proto, std::vector<Upvalue> Captures,
     while (Upvalues.size() < P.Upvalues)
         throw Error("Main prototype has unbound upvalues");
     BuildDataflow();
+    if (!E.Settings.ModulePath.empty())
+    {
+        std::vector<unsigned> Captures;
+        for (const auto &U : Upvalues)
+        {
+            auto Refs = Tokens(U.Value);
+            Captures.push_back(!U.Reference && Refs.size() == 1 ? Refs.front() : std::numeric_limits<unsigned>::max());
+        }
+        ExportFrame = E.ExportGraph.Record(P, Id, ReadSymbols, WriteSymbols, Captures, Parameters);
+        if (Depth == 0)
+            E.MainExportFrame = ExportFrame;
+    }
 }
 
 void Function::BuildDataflow()
@@ -803,8 +829,10 @@ std::string Function::Locator() const
             break;
         }
     }
-    return "filtergc(\"function\", { Line = " + (P.Line ? std::to_string(P.Line) : "nil") + ", Constants = {" +
-           (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
+    auto Text = "filtergc(\"function\", { " + E.Settings.FilterLineField + " = " + (P.Line ? std::to_string(P.Line) : "nil") +
+                ", Constants = {" + (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
+    E.Locators[Id] = Text;
+    return "\x1d" + std::to_string(Id) + "\x1c";
 }
 
 std::string Function::Member(const std::string &Object, unsigned Index) const
@@ -835,13 +863,13 @@ std::string Function::Signature() const
     return "(" + Join(Args) + ")";
 }
 
-std::string Function::Closure(const Instruction &I)
+std::string Function::Closure(const Instruction &I, std::vector<Statement> &Out)
 {
     unsigned Child = I.Op == LOP_NEWCLOSURE ? P.Children.at(unsigned(I.D)) : P.Constants.at(unsigned(I.D)).Index;
     E.Parents[Child].insert(Id);
     std::vector<Upvalue> Captures;
-    std::vector<std::string> Arguments, Bindings;
     std::string Self;
+    unsigned SelfSymbol = std::numeric_limits<unsigned>::max();
     for (unsigned J = 0; J < I.Captures.size(); ++J)
     {
         auto [Kind, R] = I.Captures[J];
@@ -862,7 +890,18 @@ std::string Function::Closure(const Instruction &I)
         if (Kind == LCT_VAL && R == I.A)
         {
             if (Self.empty())
-                Self = Token(E.New(U.Name, Child, true, true));
+            {
+                auto Destination = SymbolAt(I.A, I.Pc, true);
+                unsigned Definitions = E.Symbols[Destination].Parameter ? 1u : 0u;
+                for (const auto &Code : P.Instructions)
+                    for (auto Reg : Writes(Code, P))
+                        if (SymbolAt(Reg, Code.Pc, true) == Destination)
+                            ++Definitions;
+                SelfSymbol = !Dispatch && !E.Symbols[Destination].Cell && Definitions == 1
+                                 ? Destination
+                                 : E.New(E.C.Prototypes[Child].Name.empty() ? "RecursiveFunction" : E.C.Prototypes[Child].Name, Id, true);
+                Self = Token(SelfSymbol);
+            }
             U.Value = Self;
             U.Cell.clear();
             Captures.push_back(std::move(U));
@@ -890,14 +929,19 @@ std::string Function::Closure(const Instruction &I)
             }
         }
         // Snapshot copy captures and reference-cell identities at closure creation, including per-iteration captures.
-        unsigned Capture = E.New(U.Name, Child, true, true, U.Reference);
-        Bindings.push_back(Token(Capture));
-        Arguments.push_back(Argument);
+        unsigned Capture = E.New(U.Name + "Capture", Id, true);
+        E.Symbols[Capture].ReferenceAlias = U.Reference;
+        Out.push_back({Kind::Assign, {Capture}, Argument});
+        auto References = Tokens(Argument);
+        if (!U.Reference && References.size() == 1 && Argument == Token(References.front()))
+            E.ExportGraph.Alias(Capture, References.front());
         U.Cell = U.Reference ? Token(Capture) : "";
         U.Value = Token(Capture) + (U.Reference ? "[1]" : "");
         Captures.push_back(std::move(U));
     }
     Function Nested(E, Child, std::move(Captures), Depth + 1);
+    if (!E.Settings.ModulePath.empty())
+        E.ExportGraph.Closure(SymbolAt(I.A, I.Pc, true), Nested.ExportFrame, ExportFrame, I.Pc);
     auto Next = Index(I.Next);
     if (!Nested.Parameters.empty() && E.C.Prototypes[Child].Locals.empty() && Next < P.Instructions.size())
     {
@@ -916,34 +960,10 @@ std::string Function::Closure(const Instruction &I)
             Text += " | " + Nested.Locator();
     }
     Text += "\n" + Body + "end";
-    if (!Self.empty())
+    if (!Self.empty() && SelfSymbol != SymbolAt(I.A, I.Pc, true))
     {
-        Text = "local function " + Self + Text.substr(8) + "\nreturn " + Self;
-        std::string Wrapped = "(function(" + Join(Bindings) + ")\n";
-        std::size_t Start = 0;
-        do
-        {
-            auto End = Text.find('\n', Start);
-            Wrapped += std::string(E.Settings.IndentWidth, ' ') + Text.substr(Start, End == std::string::npos ? End : End - Start) + "\n";
-            if (End == std::string::npos)
-                break;
-            Start = End + 1;
-        } while (Start < Text.size());
-        return Wrapped + "end)(" + Join(Arguments) + ")";
-    }
-    if (!Arguments.empty())
-    {
-        std::string Wrapped = "(function(" + Join(Bindings) + ")\n";
-        Wrapped += std::string(E.Settings.IndentWidth, ' ') + "return " + Text;
-        // Indent all lines of the returned function by the wrapper indentation.
-        auto FirstNewline = Wrapped.find('\n') + 1;
-        auto Next = Wrapped.find('\n', FirstNewline);
-        while (Next != std::string::npos)
-        {
-            Wrapped.insert(Next + 1, E.Settings.IndentWidth, ' ');
-            Next = Wrapped.find('\n', Next + 1 + E.Settings.IndentWidth);
-        }
-        return Wrapped + "\nend)(" + Join(Arguments) + ")";
+        Out.push_back({Kind::Assign, {SelfSymbol}, Text});
+        return Self;
     }
     return Text;
 }
@@ -1161,7 +1181,7 @@ void Function::Simple(const Instruction &I, std::vector<Statement> &Out)
             E.Symbols[S].Name = E.Symbols[Nice].Name;
             E.Symbols[S].Base = E.Symbols[Nice].Base;
         }
-        Set(Closure(I));
+        Set(Closure(I, Out));
         break;
     }
     case LOP_NAMECALL:
@@ -1870,7 +1890,7 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                 {
                     bool Stable = true;
                     for (auto Dependency : Tokens(S.Text))
-                        if (E.Symbols[Dependency].Cell || WritesCount[Dependency] > 1)
+                        if (E.Symbols[Dependency].Cell || E.Symbols[Dependency].ReferenceAlias || WritesCount[Dependency] > 1)
                             Stable = false;
                     if (Stable)
                     {
@@ -1911,7 +1931,7 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                     auto BeforeUse = Next.Text.substr(0, UsePosition);
                     bool CanReorder = S.Pure;
                     for (auto Dependency : Tokens(S.Text))
-                        if (E.Symbols[Dependency].Cell)
+                        if (E.Symbols[Dependency].Cell || E.Symbols[Dependency].ReferenceAlias)
                             CanReorder = false;
                     bool Ordered = CanReorder || BeforeUse.find_first_of(")[.:+-*/%^#") == std::string::npos;
                     auto PrefixSymbols = Tokens(BeforeUse);
@@ -2275,7 +2295,8 @@ std::string Function::Generate(bool Main)
             if (!Contains(First, U))
                 continue;
             bool Defines = std::find(First.Left.begin(), First.Left.end(), U) != First.Left.end();
-            if (!(Defines && (First.Type == Kind::For || (First.Type == Kind::Assign && First.Text.find(Token(U)) == std::string::npos))))
+            if (!(Defines && (First.Type == Kind::For || (First.Type == Kind::Assign && (First.Text.find(Token(U)) == std::string::npos ||
+                                                                                         First.Text.starts_with("function("))))))
                 ScopedDeclarations[Scope].insert(U);
             break;
         }
@@ -2338,6 +2359,11 @@ std::string Function::Generate(bool Main)
 
 Result Decompile(std::string_view Bytecode, const Options &Settings)
 {
+    if (Settings.FilterLineField != "Line" && Settings.FilterLineField != "StartLine")
+        throw Error("Filter field must be Line or StartLine");
+    if (Settings.ModulePath.size() > 8192 ||
+        std::any_of(Settings.ModulePath.begin(), Settings.ModulePath.end(), [](unsigned char C) { return C < 32 || C >= 127; }))
+        throw Error("Module path must be a single-line ASCII expression with escaped names (maximum 8192 bytes)");
     if (Settings.IndentWidth < 1 || Settings.IndentWidth > 16)
         throw Error("Indent width must be between 1 and 16");
     auto C = ReadBytecode(Bytecode, Settings);

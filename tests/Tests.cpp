@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 class RobloxEncoder : public Luau::BytecodeEncoder
@@ -177,6 +178,8 @@ int main()
                         Generated = Result.Source;
                         if (Generated.find(';') != std::string::npos)
                             throw std::runtime_error("Generated a statement semicolon");
+                        if (Generated.find("end)(") != std::string::npos)
+                            throw std::runtime_error("Generated an inline capture factory wrapper");
                         if (!StateMachine && Name.starts_with("cf_") && Result.StateMachineFunctions)
                             throw std::runtime_error("Reducible control flow used state-machine fallback");
                         auto Recompiled = Luau::compile(Generated, Compile);
@@ -259,6 +262,85 @@ int main()
         ++Failed;
         std::cerr << "FAIL formatting/locator: " << Error.what() << '\n';
     }
+    try
+    {
+        auto Read = [](const std::string &Path)
+        {
+            std::ifstream In(Path, std::ios::binary);
+            if (!In)
+                throw std::runtime_error("Cannot read bridge fixture: " + Path);
+            return std::string(std::istreambuf_iterator<char>(In), {});
+        };
+        auto Harness = Read(std::string(TAZE_SOURCE_DIR) + "/tests/BridgeHarness.luau");
+        auto Bridge = Read(std::string(TAZE_SOURCE_DIR) + "/tools/Decompile.luau");
+        auto Marker = Harness.find("--!BRIDGE_SOURCE!");
+        Harness.replace(Marker, std::string("--!BRIDGE_SOURCE!").size(), Bridge);
+        if (Execute(Luau::compile(Harness)) != Execute(Luau::compile("return 6")))
+            throw std::runtime_error("Bridge probe modes failed");
+        Passed += 6;
+    }
+    catch (const std::exception &Error)
+    {
+        ++Failed;
+        std::cerr << "FAIL bridge probe: " << Error.what() << '\n';
+    }
+    const std::vector<std::tuple<std::string, std::string, std::string>> Modules = {
+        {"direct", "local M={}; function M.Read() return 17 end return M", ".Read"},
+        {"nested", "local M={Inner={}}; function M.Inner.Read() return 17 end return M", ".Inner.Read"},
+        {"numeric", "local M={function() return 17 end}; return M", "[1]"},
+        {"quoted_key", "local M={}; M['#1']=function() return 17 end return M", "[\"#1\"]"},
+        {"factory",
+         "local M={}; M.__index=M; function M.new() return setmetatable({},M) end function M.Read() return 17 end return M.new()", ".Read"},
+        {"returned_function", "return function() return 17 end", ""},
+        {"discarded", "local M={}; function M.Read() return 17 end return {}", "NONE"},
+        {"ambiguous",
+         "local A,B={},{}; function A.Read() return 17 end function B.Read() return 18 end if getfenv().Flag then return A else return B "
+         "end",
+         "NONE"},
+        {"conditional", "local M={}; if getfenv().Flag then function M.Read() return 17 end end return M", "NONE"},
+        {"overwritten", "local M={}; function M.Read() return 17 end M.Read=false return M", "NONE"},
+        {"escaped", "local M={}; function M.Read() return 17 end UnknownMutator(M) return M", "NONE"},
+        {"cycle", "local M={}; M.Self=M; function M.Read() return 17 end return M", ".Read"},
+    };
+    for (const auto &[Name, Source, Suffix] : Modules)
+        for (int Optimization : {0, 1, 2})
+        {
+            try
+            {
+                Luau::CompileOptions Compile;
+                Compile.optimizationLevel = Optimization;
+                Compile.debugLevel = 2;
+                Taze::Options Settings;
+                Settings.ModulePath = "game.ReplicatedStorage.Test";
+                Settings.FilterLineField = "StartLine";
+                auto Result = Taze::Decompile(Luau::compile(Source, Compile), Settings).Source;
+                auto Expected = " | require(" + Settings.ModulePath + ")" + Suffix;
+                if (Suffix == "NONE" ? Result.find(" | require(") != std::string::npos : Result.find(Expected) == std::string::npos)
+                    throw std::runtime_error("Incorrect module export locator\n" + Result);
+                auto Bytes = Luau::compile(Result);
+                if (Bytes[0] == 0)
+                    throw std::runtime_error(Bytes.substr(1));
+                if (Result.find("filtergc(\"function\", { Line =") != std::string::npos)
+                    throw std::runtime_error("StartLine option ignored");
+                if (Suffix != "NONE")
+                {
+                    auto Query = "local Module = (function() " + Source +
+                                 " end)()\n"
+                                 "local game = {ReplicatedStorage={Test={}}}\n"
+                                 "local function require(Path) assert(Path==game.ReplicatedStorage.Test) return Module end\n"
+                                 "local Target = require(game.ReplicatedStorage.Test)" +
+                                 Suffix + "\nreturn type(Target),Target()";
+                    if (Execute(Luau::compile(Query)) != Execute(Luau::compile("return 'function',17")))
+                        throw std::runtime_error("Export locator did not reach the expected returned function");
+                }
+                ++Passed;
+            }
+            catch (const std::exception &Error)
+            {
+                ++Failed;
+                std::cerr << "FAIL module " << Name << " O" << Optimization << ": " << Error.what() << '\n';
+            }
+        }
     // Every proper prefix of a valid chunk must fail without crashing or producing partial output.
     auto Sample = Luau::compile("return 123");
     for (std::size_t Size = 0; Size < Sample.size(); ++Size)

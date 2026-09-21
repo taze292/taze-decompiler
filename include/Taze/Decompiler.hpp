@@ -25,6 +25,8 @@ struct Options
     bool IncludeUpvalueComments = true;
     bool IncludeFunctionLocators = true;
     bool ForceStateMachine = false;
+    std::string FilterLineField = "Line";
+    std::string ModulePath;
     std::size_t MaxInputBytes = 64 * 1024 * 1024;
     std::size_t MaxOutputBytes = 64 * 1024 * 1024;
 };

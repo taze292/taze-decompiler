@@ -182,8 +182,7 @@ std::string Process(std::string_view Request, const Options &Settings)
     Request.remove_prefix(Newline + 1);
     try
     {
-        if (Request.empty() || Request.size() % 2 || Request.size() / 2 > Settings.MaxInputBytes)
-            throw Error("Invalid bytecode length");
+        Options RequestSettings = Settings;
         auto Digit = [](char C) -> unsigned
         {
             if (C >= '0' && C <= '9')
@@ -194,10 +193,34 @@ std::string Process(std::string_view Request, const Options &Settings)
                 return unsigned(C - 'A' + 10);
             throw Error("Bytecode must be hex encoded");
         };
-        std::string Bytes(Request.size() / 2, '\0');
-        for (std::size_t I = 0; I < Bytes.size(); ++I)
-            Bytes[I] = char((Digit(Request[I * 2]) << 4) | Digit(Request[I * 2 + 1]));
-        auto Result = Decompile(Bytes, Settings);
+        auto Decode = [&](std::string_view Hex, std::size_t Limit)
+        {
+            if (Hex.size() % 2 || Hex.size() / 2 > Limit)
+                throw Error("Invalid hex payload length");
+            std::string Bytes(Hex.size() / 2, '\0');
+            for (std::size_t I = 0; I < Bytes.size(); ++I)
+                Bytes[I] = char((Digit(Hex[I * 2]) << 4) | Digit(Hex[I * 2 + 1]));
+            return Bytes;
+        };
+        if (Request.starts_with("TAZE2\n"))
+        {
+            Request.remove_prefix(6);
+            auto Line = [&]()
+            {
+                auto End = Request.find('\n');
+                if (End == std::string_view::npos)
+                    throw Error("Incomplete bridge metadata");
+                auto Part = Request.substr(0, End);
+                Request.remove_prefix(End + 1);
+                return Part;
+            };
+            RequestSettings.FilterLineField = std::string(Line());
+            RequestSettings.ModulePath = Decode(Line(), 8192);
+        }
+        if (Request.empty())
+            throw Error("Empty bytecode payload");
+        auto Bytes = Decode(Request, Settings.MaxInputBytes);
+        auto Result = Decompile(Bytes, RequestSettings);
         std::osyncstream(std::cout) << "Request " << Id << ": " << Bytes.size() << " bytecode bytes -> " << Result.Source.size()
                                     << " source bytes, " << Result.StateMachineFunctions << " fallback functions\n";
         return Id + "\nok\n" + Result.Source;
@@ -243,7 +266,7 @@ void Session(SOCKET Client, const Options &Settings)
         }
         if (Opcode >= 8 && (!Final || Size > 125))
             throw Error("Invalid control frame");
-        if (Size > Settings.MaxInputBytes * 2 + 32 || Size + Message.size() > Settings.MaxInputBytes * 2 + 32)
+        if (Size > Settings.MaxInputBytes * 2 + 16448 || Size + Message.size() > Settings.MaxInputBytes * 2 + 16448)
             throw Error("WebSocket message exceeds bytecode size limit");
         std::array<char, 4> Mask{};
         Read(Client, Mask.data(), Mask.size());

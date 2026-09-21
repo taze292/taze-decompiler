@@ -35,6 +35,8 @@ int main(int Argc, char **Argv)
                              "  --no-header                  Omit generator header\n"
                              "  --no-lines                   Omit function line comments\n"
                              "  --no-filtergc                Omit inline function lookup expressions\n"
+                             "  --filter-line Line|StartLine  Select the executor's filtergc line field\n"
+                             "  --module-path EXPR           Module Instance expression for require lookups\n"
                              "  --no-upvalues                Omit capture comments\n";
                 return 0;
             }
@@ -60,6 +62,10 @@ int main(int Argc, char **Argv)
                 Settings.IncludeUpvalueComments = false;
             else if (Arg == "--no-filtergc")
                 Settings.IncludeFunctionLocators = false;
+            else if (Arg == "--filter-line")
+                Settings.FilterLineField = Value();
+            else if (Arg == "--module-path")
+                Settings.ModulePath = Value();
             else if (Arg == "--state-machine")
                 Settings.ForceStateMachine = true;
             else if (Arg == "--disassemble")
