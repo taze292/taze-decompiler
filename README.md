@@ -4,6 +4,10 @@ A C++20 Luau bytecode decompiler with a command-line tool and a reusable static 
 
 The supplied Luau source stays on disk as a build dependency and is **excluded from Git**. Build products and extracted game scripts are excluded too.
 
+## Download
+
+Download [Taze v0.1.0 for Windows x64](https://github.com/taze292/taze-decompiler/releases/tag/v0.1.0). Extract the ZIP and run `Start-Decompiler.cmd` (or run `taze.exe --serve`). Keep it running, then execute the included `Decompile.luau` loader in your executor. The loader downloads the bridge pinned to the same release tag. The executable and loader are also available as individual assets, with SHA-256 checksums. The packaged executable includes the C++ runtime and does not require Clang or the Luau source checkout.
+
 ## Build on this Windows machine
 
 ```powershell
