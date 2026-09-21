@@ -197,6 +197,68 @@ int main()
                             << Generated;
                     }
                 }
+    // Function locators are executable metadata: verify escaped literals, imports and per-prototype membership.
+    try
+    {
+        auto Check = [&](bool Condition, const char *Message)
+        {
+            if (!Condition)
+                throw std::runtime_error(Message);
+            ++Passed;
+        };
+        Luau::CompileOptions Compile;
+        Compile.debugLevel = 2;
+        Compile.optimizationLevel = 1;
+        const std::string StyleSource = "local Shared = 7\n"
+                                        "local function Probe(Input)\n"
+                                        "    local First = Input.Name\n"
+                                        "    local Second = Input.Value\n"
+                                        "    Input.Value = First\n"
+                                        "    Input.Name = Second\n"
+                                        "    return Shared, math.abs(Input.Count), \"Marker\\n\\\"\\\\\\000\", 12345.75\n"
+                                        "end\nreturn Probe";
+        auto Bytecode = Luau::compile(StyleSource, Compile);
+        auto Source = Taze::Decompile(Bytecode).Source;
+        Check(Source.find("-- Line: 2 | filtergc(\"function\", { Line = 2, Constants = {") != std::string::npos, "Missing inline locator");
+        auto Start = Source.find("filtergc(");
+        auto Lookup = Source.substr(Start, Source.find('\n', Start) - Start);
+        auto LookupTest = Luau::compile("local function filtergc(Kind, Options, One) assert(Kind=='function' and One==true) "
+                                        "local StringFound, NumberFound, ImportFound = false,false,false "
+                                        "for _,Value in Options.Constants do "
+                                        "if Value==\"Marker\\n\\\"\\\\\\000\" then StringFound=true end "
+                                        "if Value==12345.75 then NumberFound=true end "
+                                        "if Value==math.abs then ImportFound=true end "
+                                        "assert(Value~=7, 'An upvalue was incorrectly included as a constant') end "
+                                        "return StringFound,NumberFound,ImportFound,Options.Line end return " +
+                                        Lookup);
+        Check(Execute(LookupTest) == Execute(Luau::compile("return true,true,true,2")), "Locator constants do not match original values");
+        Check(Source.find("Upvalues:\n        1: Shared (type \"Copy\")") != std::string::npos, "Missing Upvalues label");
+        Check(Source.find("local First = Input.Name\n    local Second = Input.Value\n\n    Input.Value = First") != std::string::npos,
+              "Consecutive locals were not grouped and separated from writes");
+        Check(Source.find("\n\n    return ") != std::string::npos, "Missing return separation");
+        Check(Source.find("\n    \n") == std::string::npos, "Blank lines contain indentation whitespace");
+        Taze::Options Settings;
+        Settings.IncludeFunctionLocators = false;
+        auto WithoutLookup = Taze::Decompile(Bytecode, Settings).Source;
+        Check(WithoutLookup.find("filtergc(") == std::string::npos && WithoutLookup.find("-- Line: 2") != std::string::npos,
+              "Locator suppression removed line comments");
+        Settings.IncludeFunctionLocators = true;
+        Settings.IncludeLineComments = false;
+        Check(Taze::Decompile(Bytecode, Settings).Source.find("filtergc(") == std::string::npos,
+              "Disabled line comments emitted a locator");
+        Settings.IncludeUpvalueComments = false;
+        Check(Taze::Decompile(Bytecode, Settings).Source.find("Upvalues:") == std::string::npos,
+              "Disabled upvalue comments emitted a label");
+        Compile.debugLevel = 0;
+        auto Stripped = Taze::Decompile(Luau::compile(StyleSource, Compile)).Source;
+        Check(Stripped.find("-- Line: 2 | filtergc(\"function\", { Line = 2,") != std::string::npos,
+              "Stripped local debug names should preserve the serialized function start line");
+    }
+    catch (const std::exception &Error)
+    {
+        ++Failed;
+        std::cerr << "FAIL formatting/locator: " << Error.what() << '\n';
+    }
     // Every proper prefix of a valid chunk must fail without crashing or producing partial output.
     auto Sample = Luau::compile("return 123");
     for (std::size_t Size = 0; Size < Sample.size(); ++Size)

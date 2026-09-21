@@ -34,6 +34,7 @@ int main(int Argc, char **Argv)
                              "  --indent N                   Spaces per indentation level (1..16)\n"
                              "  --no-header                  Omit generator header\n"
                              "  --no-lines                   Omit function line comments\n"
+                             "  --no-filtergc                Omit inline function lookup expressions\n"
                              "  --no-upvalues                Omit capture comments\n";
                 return 0;
             }
@@ -57,6 +58,8 @@ int main(int Argc, char **Argv)
                 Settings.IncludeLineComments = false;
             else if (Arg == "--no-upvalues")
                 Settings.IncludeUpvalueComments = false;
+            else if (Arg == "--no-filtergc")
+                Settings.IncludeFunctionLocators = false;
             else if (Arg == "--state-machine")
                 Settings.ForceStateMachine = true;
             else if (Arg == "--disassemble")

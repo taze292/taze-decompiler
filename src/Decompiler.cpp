@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <functional>
 #include <numeric>
 #include <queue>
@@ -388,6 +389,7 @@ class Function
     std::string Read(unsigned R, unsigned Pc) const;
     std::string WriteName(unsigned R, unsigned Pc) const;
     std::string ConstantAt(unsigned Index, unsigned Recursion = 0) const;
+    std::string Locator() const;
     std::string Member(const std::string &Object, unsigned Index) const;
     std::string Global(unsigned Index) const;
     Statement Assign(unsigned R, const Instruction &I, std::string Value, bool Pure = false, bool Call = false);
@@ -775,6 +777,36 @@ std::string Function::ConstantAt(unsigned Index, unsigned Recursion) const
         throw Error("Constant is not a source literal");
     }
 }
+std::string Function::Locator() const
+{
+    std::vector<std::string> Constants;
+    for (unsigned Index = 0; Index < P.Constants.size(); ++Index)
+    {
+        const auto &K = P.Constants[Index];
+        switch (K.Tag)
+        {
+        case LBC_CONSTANT_NUMBER:
+            // NaN cannot be matched by equality. Nil is not an element of a Luau array.
+            if (!std::isnan(K.Number))
+                Constants.push_back(ConstantAt(Index));
+            break;
+        case LBC_CONSTANT_BOOLEAN:
+        case LBC_CONSTANT_STRING:
+        case LBC_CONSTANT_IMPORT:
+        case LBC_CONSTANT_INTEGER:
+        case LBC_CONSTANT_VECTOR:
+        case LBC_CONSTANT_VECTORD:
+            Constants.push_back(ConstantAt(Index));
+            break;
+        default:
+            // Serialized table templates and closure prototypes do not identify live objects.
+            break;
+        }
+    }
+    return "filtergc(\"function\", { Line = " + (P.Line ? std::to_string(P.Line) : "nil") + ", Constants = {" +
+           (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
+}
+
 std::string Function::Member(const std::string &Object, unsigned Index) const
 {
     const auto &K = P.Constants.at(Index);
@@ -878,7 +910,11 @@ std::string Function::Closure(const Instruction &I)
     std::string Body = Nested.Generate();
     std::string Text = "function" + Nested.Signature();
     if (E.Settings.IncludeLineComments)
+    {
         Text += " -- Line: " + (E.C.Prototypes[Child].Line ? std::to_string(E.C.Prototypes[Child].Line) : "Unknown");
+        if (E.Settings.IncludeFunctionLocators)
+            Text += " | " + Nested.Locator();
+    }
     Text += "\n" + Body + "end";
     if (!Self.empty())
     {
@@ -1972,12 +2008,32 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
         do
         {
             auto End = Text.find('\n', Start);
-            Out += Pad + Text.substr(Start, End == std::string::npos ? End : End - Start) + '\n';
+            auto Part = Text.substr(Start, End == std::string::npos ? End : End - Start);
+            Out += (Part.find_first_not_of(" \t\r") == std::string::npos ? "" : Pad + Part) + '\n';
             if (End == std::string::npos)
                 break;
             Start = End + 1;
         } while (Start < Text.size());
     };
+    auto Separate = [&]()
+    {
+        if (!Out.empty() && !Out.ends_with("\n\n"))
+            Out += '\n';
+    };
+    enum class Group
+    {
+        None,
+        Locals,
+        Services,
+        Modules,
+        Table,
+        Writes,
+        Calls,
+        Exit,
+        Block
+    };
+    Group Previous = Group::None;
+    std::string PreviousReceiver;
     if (auto Found = ScopedDeclarations.find(&Nodes); Found != ScopedDeclarations.end())
     {
         std::vector<std::string> Names;
@@ -1985,14 +2041,45 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
             if (Declared.insert(Id).second)
                 Names.push_back(Token(Id));
         if (!Names.empty())
+        {
             Line("local " + Join(Names));
+            Separate();
+        }
     }
     for (std::size_t N = 0; N < Nodes.size(); ++N)
     {
         const auto &S = Nodes[N];
-        bool Block = !S.Body.empty() || S.Type == Kind::Function || S.Text.find("function(") != std::string::npos;
-        if (Block && !Out.empty() && !Out.ends_with("\n\n"))
-            Out += '\n';
+        bool Block = S.Type == Kind::If || S.Type == Kind::While || S.Type == Kind::Repeat || S.Type == Kind::For ||
+                     S.Type == Kind::Function || S.Text.find("function(") != std::string::npos;
+        Group Current = Group::Calls;
+        std::string Receiver;
+        if (Block)
+            Current = Group::Block;
+        else if (S.Type == Kind::Assign)
+        {
+            bool New = std::any_of(S.Left.begin(), S.Left.end(), [&](auto U) { return !Declared.count(U); });
+            auto Text = Unwrap(S.Text);
+            Current = New ? Group::Locals : Group::Writes;
+            if (New && Text.find(":GetService(") != std::string::npos)
+                Current = Group::Services;
+            else if (New && Text.starts_with("require("))
+                Current = Group::Modules;
+            else if (Text.starts_with('{') && Text.find('\n') != std::string::npos)
+                Current = Group::Table;
+        }
+        else if (S.Type == Kind::Return || S.Type == Kind::Break || S.Type == Kind::Continue)
+            Current = Group::Exit;
+        else if (S.Type == Kind::Raw)
+        {
+            auto Assignment = S.Text.find(" = ");
+            Current = Assignment != std::string::npos && PrefixExpression(S.Text.substr(0, Assignment)) ? Group::Writes : Group::Calls;
+            auto References = Tokens(S.Text);
+            if (!References.empty() && S.Text.starts_with(Token(References.front())))
+                Receiver = Token(References.front());
+        }
+        if (Previous != Group::None && (Current != Previous || Block || Current == Group::Table ||
+                                        (!Receiver.empty() && !PreviousReceiver.empty() && Receiver != PreviousReceiver)))
+            Separate();
         switch (S.Type)
         {
         case Kind::Assign:
@@ -2021,6 +2108,9 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
         case Kind::Raw:
         {
             auto Text = CleanExpression(S.Text);
+            auto Equal = Text.find(" = ");
+            if (Equal != std::string::npos && PrefixExpression(Text.substr(0, Equal)))
+                Text = Text.substr(0, Equal + 3) + CleanExpression(Unwrap(Text.substr(Equal + 3)));
             // A lexical block separates a parenthesized call without a statement semicolon.
             if (Text.starts_with('('))
             {
@@ -2092,8 +2182,10 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
         default:
             throw Error("Internal: unsupported source statement");
         }
-        if (Block && N + 1 < Nodes.size())
-            Out += '\n';
+        Previous = Current;
+        PreviousReceiver = Receiver;
+        if ((Block || Current == Group::Table) && N + 1 < Nodes.size())
+            Separate();
     }
     E.Budget(Out.size());
     return Out;
@@ -2197,7 +2289,7 @@ std::string Function::Generate(bool Main)
     std::string Pad(Indent * E.Settings.IndentWidth, ' '), Out;
     if (E.Settings.IncludeUpvalueComments && !Upvalues.empty())
     {
-        Out += Pad + "--[[\n";
+        Out += Pad + "--[[\n" + Pad + std::string(E.Settings.IndentWidth, ' ') + "Upvalues:\n";
         for (unsigned J = 0; J < Upvalues.size(); ++J)
             Out += Pad + std::string(E.Settings.IndentWidth, ' ') + std::to_string(J + 1) + ": " +
                    (Tokens(Upvalues[J].Value).empty() ? Upvalues[J].Name : Token(Tokens(Upvalues[J].Value).front())) + " (type \"" +

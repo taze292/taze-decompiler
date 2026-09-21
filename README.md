@@ -88,7 +88,7 @@ The [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) transport supports masked
 
 Input must be **raw, decompressed serialized Luau bytecode**, such as the string returned by `getscriptbytecode`. Source text, base64, hex text, encrypted/compressed asset containers, process memory, and native machine code are not bytecode inputs. Opcode encoding is detected by validating the entire instruction stream; override it with `--encoding plain` or `--encoding roblox`. The Roblox decoder multiplies encoded opcode bytes by 203 modulo 256, leaving AUX data unchanged. It accepts the observed 24-byte Roblox trailer only after validating Roblox-encoded instructions; the trailer is opaque and is not authenticated.
 
-Other options: `--indent 2`, `--no-header`, `--no-lines`, `--no-upvalues`, and `--state-machine`. Failures produce a nonzero exit code and an explanatory message. Reconstruction finishes before the output file is opened, so an unsupported input does not leave a partial source file.
+Other options: `--indent 2`, `--no-header`, `--no-lines`, `--no-filtergc`, `--no-upvalues`, and `--state-machine`. Failures produce a nonzero exit code and an explanatory message. Reconstruction finishes before the output file is opened, so an unsupported input does not leave a partial source file.
 
 ### Local fixture
 
@@ -103,8 +103,9 @@ The compiler's last two arguments are optimization level and debug level. Debug 
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
-local function ServiceNames() -- Line: 4
+local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Constants = { "Name" } }, true)
     --[[
+        Upvalues:
         1: UserInputService (type "Copy")
         2: RunService (type "Copy")
     ]]
@@ -115,7 +116,11 @@ end
 
 Global names, table fields, and method names retain their original spelling, because changing them would change program behavior. Generated locals and function bindings use PascalCase and avoid collisions with globals and enclosing locals. Names are allocated after optimization, so eliminated temporaries do not leave names such as `Value438` or unnecessary suffixes on imported modules. Unknown locals use compact `Value1`, `Value2`, etc. A missing line number is reported as `Unknown`. Comments, type annotations, and names erased by the compiler cannot be recovered exactly.
 
-Generated statements have no semicolons. Parenthesized call statements use a `do` block where needed to avoid Luau's ambiguous statement boundary; literal string contents remain intact. The formatter keeps blank lines around function/control-flow blocks and wraps long boolean conditions.
+Generated statements have no semicolons. Parenthesized call statements use a `do` block where needed to avoid Luau's ambiguous statement boundary; literal string contents remain intact. Consecutive locals stay together, with separate groups for services and module imports. Blank lines separate declaration groups, writes, calls, returns, multiline tables, and control-flow blocks. Initializers stay in their original evaluation order. Blank lines contain no trailing indentation.
+
+Each recovered function's line comment includes an inline, copyable `filtergc` expression. Its constants come from that function's own bytecode constant pool: strings, booleans, numbers, vectors, integers, and import expressions such as `Enum.CameraType.Custom`. Strings are escaped so the entire lookup stays on one line. Upvalues and immediate instruction operands are not constant-pool entries. Nil/NaN and table/closure templates are omitted because an array filter cannot meaningfully represent nil/NaN or recreate live object identity. If a start line is absent, the displayed line is `Unknown` and the filter uses `Line = nil`.
+
+Lookups depend on the executor's `filtergc` support and the function being alive; line/constants alone do not guarantee a unique match. The connected executor successfully matched all 31 emitted CameraModule lookups. Use `--no-filtergc` (or `Options.IncludeFunctionLocators = false`) to keep just the line number; `--no-lines` hides the entire comment. The API's [function-filter documentation](https://docs.chimera.best/Environment/filtergc/FunctionFilterOptions/) describes constant matching; the `Line` extension was verified directly in the connected executor.
 
 ## C++ API
 
@@ -151,7 +156,7 @@ Tested against client **0.739.0.7390687** using the specifically selected script
 getscriptbytecode(game.Players.LocalPlayer.PlayerScripts.PlayerModule.CameraModule)
 ```
 
-The captured module contains **13,117 bytes**, bytecode version **12**, type version **3**, and **32 prototypes**. Its decompiled output compiled successfully both locally and through Roblox's `loadstring`. All 32 prototypes now reconstruct without state-machine fallback. The output decreased from **92,557 to 25,048 bytes** (about **73% smaller**) while retaining the configured function/upvalue comments. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
+The captured module contains **13,117 bytes**, bytecode version **12**, type version **3**, and **32 prototypes**. Its decompiled output compiled successfully both locally and through Roblox's `loadstring`. All 32 prototypes reconstruct without state-machine fallback. Control-flow improvements reduced the original 92,557-byte output to 25,048 bytes; with the subsequently requested spacing and inline constant lookup comments, the current output is **32,734 bytes**. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
 
 CameraModule itself was **compiled, not executed or substituted for the running camera controller**. A successful compilation does not establish full behavioral equivalence for that module. Extracted bytecode, generated CameraModule source, and test harnesses live in the ignored `artifacts/` directory.
 

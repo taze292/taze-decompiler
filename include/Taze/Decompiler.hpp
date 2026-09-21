@@ -23,6 +23,7 @@ struct Options
     bool IncludeHeader = true;
     bool IncludeLineComments = true;
     bool IncludeUpvalueComments = true;
+    bool IncludeFunctionLocators = true;
     bool ForceStateMachine = false;
     std::size_t MaxInputBytes = 64 * 1024 * 1024;
     std::size_t MaxOutputBytes = 64 * 1024 * 1024;
