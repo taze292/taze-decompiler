@@ -14,7 +14,7 @@ assert(type(Connect) == "function", "Taze requires WebSocket.connect, websocket.
 
 local Previous = Environment.TazeBridge
 local Original = if Previous and Previous.Marker == "TazeBridge1" then Previous.Original else Environment.decompile or decompile
-local Bridge = { Marker = "TazeBridge1", Original = Original, Url = Url, Connected = false }
+local Bridge = { Marker = "TazeBridge1", Version = 2, Original = Original, Url = Url, Connected = false }
 
 local function DetectLineField()
     local Filter = filtergc or Environment.filtergc
@@ -259,5 +259,5 @@ if Previous and Previous.Marker == "TazeBridge1" then
 end
 Environment.decompile = Installed
 Environment.TazeBridge = Bridge
-print("Taze decompile installed: " .. Url)
+print("Taze decompile v2 installed: " .. Url .. " | require export lookups | " .. Bridge.FilterLineField .. " (" .. Bridge.LineProbe .. ")")
 return Bridge

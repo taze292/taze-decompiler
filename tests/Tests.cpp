@@ -341,6 +341,34 @@ int main()
                 std::cerr << "FAIL module " << Name << " O" << Optimization << ": " << Error.what() << '\n';
             }
         }
+    for (const auto &[Source, Expected] : std::vector<std::pair<std::string, std::string>>{
+             {"local A,B={},{}; print(A,B); return A,B", "local Table1 = {}"},
+             {"local A=123; print(A); return A", "local Number1 = 123"},
+             {"local A='hello'; print(A); return A", "local String1 = \"hello\""},
+             {"local A=true; print(A); return A", "local Boolean1 = true"},
+             {"local A=function() return 1 end; print(A); return A", "local function Function1("},
+             {"local A={}; if ... then A=123 end print(A); return A", "local Value1"},
+             {"local A={}; print(Table1,A); return A", "local Table2 = {}"}})
+    {
+        try
+        {
+            Luau::CompileOptions Compile;
+            Compile.optimizationLevel = 0;
+            Compile.debugLevel = 0;
+            auto Result = Taze::Decompile(Luau::compile(Source, Compile)).Source;
+            if (Result.find(Expected) == std::string::npos)
+                throw std::runtime_error("Missing categorized name: " + Expected + "\n" + Result);
+            auto Bytes = Luau::compile(Result);
+            if (Bytes[0] == 0)
+                throw std::runtime_error(Bytes.substr(1));
+            ++Passed;
+        }
+        catch (const std::exception &Error)
+        {
+            ++Failed;
+            std::cerr << "FAIL categorized names: " << Error.what() << '\n';
+        }
+    }
     // Every proper prefix of a valid chunk must fail without crashing or producing partial output.
     auto Sample = Luau::compile("return 123");
     for (std::size_t Size = 0; Size < Sample.size(); ++Size)

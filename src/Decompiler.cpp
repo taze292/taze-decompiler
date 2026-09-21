@@ -347,6 +347,7 @@ struct Symbol
     bool Keep = false, Parameter = false, Cell = false;
     unsigned Owner = 0;
     bool ReferenceAlias = false;
+    std::string Category = {};
 };
 struct Upvalue
 {
@@ -488,7 +489,7 @@ class Engine
                 Allocate(Parent);
                 Taken.insert(Used[Parent].begin(), Used[Parent].end());
             }
-            unsigned Value = 1;
+            std::map<std::string, unsigned> Counters;
             for (auto Id : ByOwner[Owner])
             {
                 auto &S = Symbols[Id];
@@ -497,9 +498,10 @@ class Engine
                                std::all_of(Base.begin() + 5, Base.end(), [](unsigned char C) { return std::isdigit(C); });
                 if (Generic)
                 {
+                    const auto Prefix = S.Category.empty() ? "Value" : S.Category;
                     do
                     {
-                        S.Name = "Value" + std::to_string(Value++);
+                        S.Name = Prefix + std::to_string(++Counters[Prefix]);
                     } while (Taken.count(S.Name));
                 }
                 else
@@ -717,6 +719,101 @@ void Function::BuildDataflow()
             WriteSymbols[J][R] = Resolve(WriteSymbols[J][R], R);
         }
     }
+
+    // Union possible types over all definitions, including loop/branch joins. Only
+    // specialize anonymous names when every reaching definition agrees.
+    std::map<unsigned, unsigned> Types;
+    std::map<unsigned, std::vector<unsigned>> Copies;
+    std::queue<unsigned> Pending;
+    auto Add = [&](unsigned S, unsigned Mask)
+    {
+        if ((Types[S] | Mask) != Types[S])
+        {
+            Types[S] |= Mask;
+            Pending.push(S);
+        }
+    };
+    auto ConstantType = [&](unsigned K)
+    {
+        switch (P.Constants[K].Tag)
+        {
+        case LBC_CONSTANT_TABLE:
+        case LBC_CONSTANT_TABLE_WITH_CONSTANTS:
+            return 2u;
+        case LBC_CONSTANT_CLOSURE:
+            return 4u;
+        case LBC_CONSTANT_STRING:
+            return 8u;
+        case LBC_CONSTANT_NUMBER:
+            return 16u;
+        case LBC_CONSTANT_BOOLEAN:
+            return 32u;
+        case LBC_CONSTANT_VECTOR:
+            return 64u;
+        case LBC_CONSTANT_INTEGER:
+            return 128u;
+        default:
+            return 1u;
+        }
+    };
+    for (unsigned R = 0; R < P.Stack; ++R)
+        Add(Resolve(Initial[R], R), 1);
+    for (unsigned J = 0; J < Count; ++J)
+    {
+        if (!Visited[J])
+            continue;
+        const auto &I = P.Instructions[J];
+        for (auto R : Writes(I, P))
+        {
+            auto S = WriteSymbols[J][R];
+            if (I.Op == LOP_MOVE)
+            {
+                Copies[ReadSymbols[J][I.B]].push_back(S);
+                continue;
+            }
+            unsigned Mask = 1;
+            if (R == I.A)
+                switch (I.Op)
+                {
+                case LOP_NEWTABLE:
+                    Mask = 2;
+                    break;
+                case LOP_NEWCLOSURE:
+                case LOP_DUPCLOSURE:
+                    Mask = 4;
+                    break;
+                case LOP_LOADK:
+                case LOP_DUPTABLE:
+                    Mask = ConstantType(unsigned(I.D));
+                    break;
+                case LOP_LOADKX:
+                    Mask = ConstantType(I.Aux);
+                    break;
+                case LOP_LOADN:
+                    Mask = 16;
+                    break;
+                case LOP_LOADB:
+                case LOP_NOT:
+                    Mask = 32;
+                    break;
+                default:
+                    break;
+                }
+            Add(S, Mask);
+        }
+    }
+    while (!Pending.empty())
+    {
+        auto S = Pending.front();
+        Pending.pop();
+        for (auto Destination : Copies[S])
+            Add(Destination, Types[S]);
+    }
+    const std::map<unsigned, std::string> Categories = {{2, "Table"},    {4, "Function"}, {8, "String"},   {16, "Number"},
+                                                        {32, "Boolean"}, {64, "Vector"},  {128, "Integer"}};
+    for (const auto &[S, Mask] : Types)
+        if (auto It = Categories.find(Mask); It != Categories.end())
+            E.Symbols[S].Category = It->second;
 }
 
 unsigned Function::SymbolAt(unsigned R, unsigned Pc, bool Write) const

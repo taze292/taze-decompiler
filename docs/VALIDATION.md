@@ -2,7 +2,7 @@
 
 The final Windows Release build used ClangCL 22.1.3, CMake, and the installed Windows SDK.
 
-`build/Release/taze-tests.exe` reported **1,579 passed, 0 failed**. CTest also passed. These are individual fixture/configuration, metadata and input-validation checks, not 1,579 distinct source programs. The suite compares execution results across 55 behavioral fixtures, optimization levels 0–2, stripped/full debug data, structured/fallback emission, versions 9 and 11–14, and plain/Roblox opcode encodings.
+`build/Release/taze-tests.exe` reported **1,586 passed, 0 failed**. CTest also passed. These are individual fixture/configuration, metadata and input-validation checks, not 1,586 distinct source programs. The suite compares execution results across 55 behavioral fixtures, optimization levels 0–2, stripped/full debug data, structured/fallback emission, versions 9 and 11–14, and plain/Roblox opcode encodings.
 
 New regression fixtures cover chained enum tests, shared branch suffixes, early returns, mixed boolean precedence, false/nil values, side effects in conditions, loop exits, scoped captures, method installation, field/method evaluation order, naming collisions, and parenthesized call statements. These fixtures explicitly reject state-machine fallback in normal mode. The output for the fixtures is also checked for statement semicolons.
 
@@ -49,3 +49,9 @@ Six mock executor modes exercise the actual bridge source: `Line`, `StartLine`, 
 The behavioral fixtures now reject generated immediately invoked capture factories. Existing scoped-capture, recursive-function, reference-mutation, and evaluation-order cases continue to execute equivalently after replacing factories with explicit local snapshots.
 
 The latest live bridge reported `{ FilterLineField = "StartLine", LineProbe = "verified" }`. Its 32,900-byte CameraModule result compiled in Roblox, contained no capture-factory calls, and the `ShouldUseVehicleCamera` lookup returned the expected named function. CameraModule calls its constructor and returns `{}`, so none of its methods is reachable through `require`; retaining GC locators here is intentional. The project behavioral harness was rerun and returned `{ Passed = true, Version = "0.739.0.7390687" }`. The updated server and bridge were left connected.
+
+## BulletHandler and categorized names
+
+In the user's subsequent game session, reinstalling the current bridge enabled the existing export analysis for `game.ReplicatedStorage.ModuleScripts.GunModules.BulletHandler`. The emitted `require(...).Fire` expression was evaluated and compared by identity with the module's exported `Fire` function; they matched. No export-analysis change was needed for this case. The bridge now exposes `Version = 2` and prints its export-lookup mode and detected line field during installation.
+
+Seven additional checks cover stripped table, number, string, boolean, and anonymous function names, mixed-type branch fallback, and collisions with global names. The live BulletHandler output compiled successfully and contained `local Table1 = {}`, `local Table2 = {}`, `function Table1.Fire(Self)` with a `require(...).Fire` locator, and `return Table1`. The exported function was inspected, not called. The updated server and bridge were left running in that session.
