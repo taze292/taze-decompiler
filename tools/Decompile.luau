@@ -13,8 +13,28 @@ local Connect = Provider and (Provider.connect or Provider.Connect)
 assert(type(Connect) == "function", "Taze requires WebSocket.connect, websocket.connect, or syn.websocket.connect")
 
 local Previous = Environment.TazeBridge
+local PreviousDecompile = Environment.decompile or decompile
 local Original = if Previous and Previous.Marker == "TazeBridge1" then Previous.Original else Environment.decompile or decompile
-local Bridge = { Marker = "TazeBridge1", Version = 2, Original = Original, Url = Url, Connected = false }
+local Bridge = { Marker = "TazeBridge1", Version = 3, Original = Original, Url = Url, Connected = false }
+local HookTargets = { Original, PreviousDecompile }
+if Previous and Previous.Marker == "TazeBridge1" and Previous.HookTargets then
+    for _, Target in Previous.HookTargets do
+        table.insert(HookTargets, Target)
+    end
+end
+Bridge.HookTargets = {}
+local CompareInstances = compareinstances or Environment.compareinstances
+
+local function SameInstance(Left, Right)
+    if Left == Right then
+        return true
+    end
+    if Left and Right and type(CompareInstances) == "function" then
+        local Ok, Same = pcall(CompareInstances, Left, Right)
+        return Ok and Same == true
+    end
+    return false
+end
 
 local function DetectLineField()
     local Filter = filtergc or Environment.filtergc
@@ -81,21 +101,27 @@ end
 
 local function ModulePath(Target)
     if not Target:IsA("ModuleScript") then
-        return ""
+        return "", "not a ModuleScript"
     end
 
     local Parts = {}
     local Current = Target
     local LocalPlayer = game:GetService("Players").LocalPlayer
     local Base = "game"
-    while Current ~= game do
-        if Current == LocalPlayer then
+    while not SameInstance(Current, game) do
+        if SameInstance(Current, LocalPlayer) then
             Base = 'game:GetService("Players").LocalPlayer'
             break
         end
         local Parent = Current.Parent
-        if not Parent or #Parts >= 128 or Parent:FindFirstChild(Current.Name) ~= Current then
-            return ""
+        if not Parent then
+            return "", "module is not parented under game"
+        end
+        if #Parts >= 128 then
+            return "", "module hierarchy exceeds 128 levels"
+        end
+        if not SameInstance(Parent:FindFirstChild(Current.Name), Current) then
+            return "", "ambiguous child name or uncomparable instance reference: " .. Current.Name
         end
         table.insert(Parts, ':FindFirstChild(' .. QuoteName(Current.Name) .. ')')
         Current = Parent
@@ -103,7 +129,10 @@ local function ModulePath(Target)
     for Index = #Parts, 1, -1 do
         Base ..= Parts[Index]
     end
-    return if #Base <= 8192 then Base else ""
+    if #Base > 8192 then
+        return "", "module path exceeds 8192 bytes"
+    end
+    return Base, "available"
 end
 local Socket
 local Connections = {}
@@ -112,6 +141,9 @@ local NextId = 0
 local Connecting = false
 local Stopped = false
 local Installed
+local Hook = hookfunction or Environment.hookfunction
+local Wrap = newcclosure or Environment.newcclosure
+local Hooks = {}
 
 local function Disconnect(Reason)
     Bridge.Connected = false
@@ -213,7 +245,8 @@ Installed = function(Target, Timeout)
     assert(type(Bytecode) == "string" and #Bytecode > 0, "getscriptbytecode returned no bytecode for this script")
     assert(#Bytecode <= 64 * 1024 * 1024, "Bytecode exceeds the 64 MiB limit")
     local Encoded = Bytecode:gsub(".", Hex)
-    local Path = ModulePath(Target):gsub(".", Hex)
+    local Expression, PathStatus = ModulePath(Target)
+    local Path = Expression:gsub(".", Hex)
     assert(os.clock() < Deadline, "Taze timed out while reading bytecode")
     NextId += 1
     local Id = tostring(NextId)
@@ -235,6 +268,18 @@ Installed = function(Target, Timeout)
     if Request.Error then
         error("Taze: " .. Request.Error, 2)
     end
+    local _, ExportCount = Request.Source:gsub(" | require%(", "")
+    local _, GcCount = Request.Source:gsub(" | filtergc%(", "")
+    Bridge.LastRequest = {
+        ModulePath = Expression,
+        PathStatus = PathStatus,
+        ExportLookups = ExportCount,
+        GcLookups = GcCount,
+        FilterLineField = Bridge.FilterLineField,
+    }
+    if Target:IsA("ModuleScript") and Expression == "" then
+        warn("Taze: require lookups unavailable: " .. PathStatus)
+    end
     return Request.Source
 end
 
@@ -244,6 +289,14 @@ function Bridge.Stop()
     end
     Stopped = true
     Disconnect("Taze bridge stopped")
+    for Index = #Hooks, 1, -1 do
+        local Entry = Hooks[Index]
+        local Ok, Error = pcall(Hook, Entry.Target, Entry.Backup)
+        if not Ok then
+            warn("Taze could not restore a decompile hook: " .. tostring(Error))
+        end
+    end
+    table.clear(Hooks)
     if Environment.decompile == Installed then
         Environment.decompile = Original
     end
@@ -257,7 +310,31 @@ EnsureConnected(os.clock() + DefaultTimeout)
 if Previous and Previous.Marker == "TazeBridge1" then
     Previous.Stop()
 end
+-- Global assignment alone misses tools that saved the executor's old function.
+Bridge.HookStatus = "unavailable"
+if type(Hook) == "function" then
+    local Replacement = Installed
+    if type(Wrap) == "function" then
+        local Ok, Wrapped = pcall(Wrap, Installed)
+        if Ok then Replacement = Wrapped end
+    end
+    local Seen = {}
+    for _, Target in HookTargets do
+        if type(Target) == "function" and not Seen[Target] then
+            Seen[Target] = true
+            local Ok, Backup = pcall(Hook, Target, Replacement)
+            if Ok and type(Backup) == "function" then
+                table.insert(Hooks, { Target = Target, Backup = Backup })
+                table.insert(Bridge.HookTargets, Target)
+            else
+                Bridge.HookError = tostring(Backup)
+            end
+        end
+    end
+    Bridge.HookStatus = if #Hooks > 0 then "installed" else "failed"
+end
 Environment.decompile = Installed
+Bridge.Decompile = Installed
 Environment.TazeBridge = Bridge
-print("Taze decompile v2 installed: " .. Url .. " | require export lookups | " .. Bridge.FilterLineField .. " (" .. Bridge.LineProbe .. ")")
+print("Taze decompile v3 installed: " .. Url .. " | require export lookups | " .. Bridge.FilterLineField .. " (" .. Bridge.LineProbe .. ") | cached references: " .. Bridge.HookStatus)
 return Bridge

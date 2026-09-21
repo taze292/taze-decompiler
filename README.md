@@ -76,6 +76,10 @@ Re-running the script replaces its previous connection cleanly. To disconnect an
 getgenv().TazeBridge.Stop()
 ```
 
+Bridge v3 also hooks existing decompiler references when `hookfunction` is available, so tools that cached the previous function can use Taze. It preserves these targets across reinstalls and restores their previous implementations on `Stop()`. This uses the executor's [hookfunction API](https://docs.chimera.best/Closures/hookfunction/); unsupported hooks fall back to global replacement. `TazeBridge.HookStatus` reports `installed`, `failed`, or `unavailable`. `TazeBridge.Decompile(Script)` is a direct entry point if another tool replaces the global later.
+
+After a call, `TazeBridge.LastRequest` shows `ModulePath`, `PathStatus`, `ExportLookups`, `GcLookups`, and `FilterLineField`. Cloned instance references are compared with `compareinstances` when available. Missing or ambiguous module paths produce a warning instead of silently disabling `require` lookups. Copy the current `tools/Decompile.luau`; its installation message identifies version 3.
+
 Supported executor APIs are `WebSocket.connect`, `websocket.connect`, or `syn.websocket.connect`, with `Send`, `Close`, `OnMessage`, and `OnClose`. The server binds only to IPv4 loopback, supports up to eight connected clients, and disconnects sockets after ten idle minutes; the bridge reconnects on demand. Stop the server with Ctrl+C in its terminal. Existing formatting options such as `--indent 2` and `--no-upvalues` also apply in server mode. Other platforms retain file-based decompilation.
 
 The [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) transport supports masked client frames, fragmented text messages, ping/pong, and closing frames. The bridge sends `RequestId\nTAZE2\nLineField\nHexModulePath\nHexBytecode`; the path field is empty when unavailable. Legacy `RequestId\nHexBytecode` requests remain supported. Replies are `RequestId\nok\nSource` or `RequestId\nerror\nMessage`. Hex preserves arbitrary bytecode bytes without depending on executor-specific base64 helpers. The service only decompiles supplied bytes; it does not execute them or access paths supplied by clients. No third-party networking dependency is required.
@@ -107,7 +111,7 @@ The compiler's last two arguments are optimization level and debug level. Debug 
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
-local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Constants = { "Name" } }, true)
+local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Name = "ServiceNames", Constants = { "Name" } }, true)
     --[[
         Upvalues:
         1: UserInputService (type "Copy")
@@ -124,7 +128,7 @@ Generated statements have no semicolons. Parenthesized call statements use a `do
 
 Each recovered function's line comment includes an inline, copyable lookup. When its export path can be recovered and a module path is available, this becomes, for example, `-- Line: 4 | require(game.ReplicatedStorage.MyModule).Utilities.Read`. Nested tables, numeric or quoted keys, directly returned functions, and recognizable constructor/metatable exports are supported. A bounded static analysis follows returned values without executing the module. Conditional or conflicting exports, unknown mutations, and other unresolved cases retain GC lookups.
 
-For `filtergc` lookups, constants come from that function's own bytecode constant pool: strings, booleans, numbers, vectors, integers, and import expressions such as `Enum.CameraType.Custom`. Strings are escaped so the entire lookup stays on one line. Upvalues and immediate instruction operands are not constant-pool entries. Nil/NaN and table/closure templates are omitted because an array filter cannot meaningfully represent nil/NaN or recreate live object identity. If a start line is absent, the displayed line is `Unknown` and the selected line filter is `nil`.
+For `filtergc` lookups, `Name` is included when the prototype contains an original debug name; generated PascalCase names are never substituted for missing metadata. Constants come from that function's own bytecode constant pool: strings, booleans, numbers, vectors, integers, and import expressions such as `Enum.CameraType.Custom`. Strings and names are escaped so the entire lookup stays on one line. Upvalues and immediate instruction operands are not constant-pool entries. Nil/NaN and table/closure templates are omitted because an array filter cannot meaningfully represent nil/NaN or recreate live object identity. If a start line is absent, the displayed line is `Unknown` and the selected line filter is `nil`.
 
 GC lookups depend on the executor's `filtergc` support and the function being alive; line/constants alone do not guarantee a unique match. The connected executor successfully matched all 31 emitted CameraModule lookups; the updated probe verified `StartLine`. Use `--no-filtergc` (or `Options.IncludeFunctionLocators = false`) to suppress either kind of lookup and keep just the line number; `--no-lines` hides the entire comment. The API's [function-filter documentation](https://docs.chimera.best/Environment/filtergc/FunctionFilterOptions/) describes constant matching.
 

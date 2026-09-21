@@ -927,7 +927,8 @@ std::string Function::Locator() const
         }
     }
     auto Text = "filtergc(\"function\", { " + E.Settings.FilterLineField + " = " + (P.Line ? std::to_string(P.Line) : "nil") +
-                ", Constants = {" + (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
+                (P.Name.empty() ? "" : ", Name = " + Quote(P.Name)) + ", Constants = {" +
+                (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
     E.Locators[Id] = Text;
     return "\x1d" + std::to_string(Id) + "\x1c";
 }

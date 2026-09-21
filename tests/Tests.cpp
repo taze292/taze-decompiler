@@ -222,10 +222,12 @@ int main()
                                         "end\nreturn Probe";
         auto Bytecode = Luau::compile(StyleSource, Compile);
         auto Source = Taze::Decompile(Bytecode).Source;
-        Check(Source.find("-- Line: 2 | filtergc(\"function\", { Line = 2, Constants = {") != std::string::npos, "Missing inline locator");
+        Check(Source.find("-- Line: 2 | filtergc(\"function\", { Line = 2, Name = \"Probe\", Constants = {") != std::string::npos,
+              "Missing inline locator or serialized function name");
         auto Start = Source.find("filtergc(");
         auto Lookup = Source.substr(Start, Source.find('\n', Start) - Start);
         auto LookupTest = Luau::compile("local function filtergc(Kind, Options, One) assert(Kind=='function' and One==true) "
+                                        "assert(Options.Name=='Probe') "
                                         "local StringFound, NumberFound, ImportFound = false,false,false "
                                         "for _,Value in Options.Constants do "
                                         "if Value==\"Marker\\n\\\"\\\\\\000\" then StringFound=true end "
@@ -256,6 +258,7 @@ int main()
         auto Stripped = Taze::Decompile(Luau::compile(StyleSource, Compile)).Source;
         Check(Stripped.find("-- Line: 2 | filtergc(\"function\", { Line = 2,") != std::string::npos,
               "Stripped local debug names should preserve the serialized function start line");
+        Check(Stripped.find(", Name = ") == std::string::npos, "Stripped function acquired an invented GC name");
     }
     catch (const std::exception &Error)
     {

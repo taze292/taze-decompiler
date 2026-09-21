@@ -2,7 +2,7 @@
 
 The final Windows Release build used ClangCL 22.1.3, CMake, and the installed Windows SDK.
 
-`build/Release/taze-tests.exe` reported **1,586 passed, 0 failed**. CTest also passed. These are individual fixture/configuration, metadata and input-validation checks, not 1,586 distinct source programs. The suite compares execution results across 55 behavioral fixtures, optimization levels 0–2, stripped/full debug data, structured/fallback emission, versions 9 and 11–14, and plain/Roblox opcode encodings.
+`build/Release/taze-tests.exe` reported **1,587 passed, 0 failed**. CTest also passed. These are individual fixture/configuration, metadata and input-validation checks, not 1,587 distinct source programs. The suite compares execution results across 55 behavioral fixtures, optimization levels 0–2, stripped/full debug data, structured/fallback emission, versions 9 and 11–14, and plain/Roblox opcode encodings.
 
 New regression fixtures cover chained enum tests, shared branch suffixes, early returns, mixed boolean precedence, false/nil values, side effects in conditions, loop exits, scoped captures, method installation, field/method evaluation order, naming collisions, and parenthesized call statements. These fixtures explicitly reject state-machine fallback in normal mode. The output for the fixtures is also checked for statement semicolons.
 
@@ -55,3 +55,11 @@ The latest live bridge reported `{ FilterLineField = "StartLine", LineProbe = "v
 In the user's subsequent game session, reinstalling the current bridge enabled the existing export analysis for `game.ReplicatedStorage.ModuleScripts.GunModules.BulletHandler`. The emitted `require(...).Fire` expression was evaluated and compared by identity with the module's exported `Fire` function; they matched. No export-analysis change was needed for this case. The bridge now exposes `Version = 2` and prints its export-lookup mode and detected line field during installation.
 
 Seven additional checks cover stripped table, number, string, boolean, and anonymous function names, mixed-type branch fallback, and collisions with global names. The live BulletHandler output compiled successfully and contained `local Table1 = {}`, `local Table2 = {}`, `function Table1.Fire(Self)` with a `require(...).Fire` locator, and `return Table1`. The exported function was inspected, not called. The updated server and bridge were left running in that session.
+
+## Bridge v3 and named GC lookups
+
+The next live investigation found a version-2 bridge present but a different global decompiler wrapper returning an HTTP/TLS error. Global reassignment did not cover saved references. Version 3 hooks the original executor function and the currently installed wrapper where supported, preserves successful hook targets across reinstallation, and restores prior implementations on stop. The mock harness checks unavailable/rejected hooks, cached native and wrapper calls, repeated installation, restoration, cloned references, and detached module path diagnostics.
+
+Live BulletHandler decompilation through the global function, direct bridge entry point, saved wrapper, and saved native function all emitted `require(...).Fire`, including after repeated installation. A cloned BulletHandler reference retained the same export path; evaluating the locator returned the identical exported function. BulletHandler and CameraModule output compiled. Projectile and ProjectileRender also compiled, each with two recovered export lookups.
+
+GC locators now include original serialized function names when available. The executable metadata test verifies `Options.Name == "Probe"`, and an additional assertion rejects invented names in stripped bytecode. In-game, the CameraModule lookup containing `StartLine = 335, Name = "ShouldUseVehicleCamera"` returned the expected named function. The v3 bridge and updated executable were left running.
