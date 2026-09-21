@@ -1,0 +1,9 @@
+/luau-master/
+/luau/
+/build*/
+/out/
+/artifacts/
+*.obj
+*.pdb
+*.ilk
+.vs/
