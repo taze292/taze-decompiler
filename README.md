@@ -41,6 +41,45 @@ ctest --test-dir build --output-on-failure
 
 ## Use
 
+### In-game WebSocket bridge (Windows)
+
+Start the executable from this project directory and leave it running:
+
+```powershell
+./build/Release/taze.exe --serve
+```
+
+Run **`tools/Decompile.luau`** in your executor. It checks for `getscriptbytecode` and a supported WebSocket API, connects to `ws://127.0.0.1:8877/decompile`, and replaces `getgenv().decompile` only after connecting successfully. Then use:
+
+```luau
+local Source = decompile(game.Players.LocalPlayer.PlayerScripts.PlayerModule.CameraModule)
+print(Source)
+-- Optional: setclipboard(Source) or writefile("CameraModule.decompiled.luau", Source)
+```
+
+`decompile(Script, TimeoutSeconds)` returns source or raises an explanatory error. The default timeout is 30 seconds. Calls yield while waiting; concurrent calls are matched by request IDs. The next call reconnects after a disconnection. A timeout stops waiting for that request; it does not cancel work already running in C++.
+
+To change the port, run `taze.exe --serve --port 8878`, and set this **before** executing the bridge script:
+
+```luau
+getgenv().TazeConfig = {
+    Url = "ws://127.0.0.1:8878/decompile",
+    Timeout = 60,
+}
+```
+
+Re-running the script replaces its previous connection cleanly. To disconnect and restore the original executor function:
+
+```luau
+getgenv().TazeBridge.Stop()
+```
+
+Supported executor APIs are `WebSocket.connect`, `websocket.connect`, or `syn.websocket.connect`, with `Send`, `Close`, `OnMessage`, and `OnClose`. The server binds only to IPv4 loopback, supports up to eight connected clients, and disconnects sockets after ten idle minutes; the bridge reconnects on demand. Stop the server with Ctrl+C in its terminal. Existing formatting options such as `--indent 2` and `--no-upvalues` also apply in server mode. Other platforms retain file-based decompilation.
+
+The [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455) transport supports masked client frames, fragmented text messages, ping/pong, and closing frames. The small application protocol sends `RequestId\nHexBytecode` and replies `RequestId\nok\nSource` or `RequestId\nerror\nMessage`. Hex preserves arbitrary bytecode bytes without depending on executor-specific base64 helpers. The service only decompiles supplied bytes; it does not execute them or access paths supplied by clients. No third-party networking dependency is required.
+
+### File input
+
 ```powershell
 ./build/Release/taze.exe artifacts/CameraModule.luac -o artifacts/CameraModule.luau
 ./build/Release/taze.exe artifacts/CameraModule.luac --disassemble -o artifacts/CameraModule.asm

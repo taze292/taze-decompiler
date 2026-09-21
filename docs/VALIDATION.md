@@ -25,3 +25,11 @@ The user-supplied, slightly older `CameraModule.luau` comparison source was also
 CameraModule's top-level code was not executed, and the running camera controller was not replaced. These CameraModule checks establish parsing and compilation compatibility; they do not prove its entire behavior is equivalent. Behavioral equivalence checks apply to the executable regression fixtures.
 
 The captured bytecode, generated game-module source, and local harness are deliberately excluded from Git under `artifacts/`.
+
+## WebSocket bridge
+
+The Windows integration test starts a temporary loopback server and runs **16 transport checks**, including the RFC handshake hash, CLI/source parity, fragmented requests, invalid hex/bytecode followed by valid requests on the same socket, payloads above 65,535 bytes, simultaneous clients, reconnection, ping/pong, closing frames, missing masks, and oversized frame rejection. CTest runs this test alongside the 1,527 decompiler checks when PowerShell is available.
+
+The executor bridge was installed through the connected Roblox client. Its replacement `decompile` called `getscriptbytecode` on the authorized CameraModule, sent the result to the C++ server, and returned **25,048 bytes**. Roblox's `loadstring` accepted the returned source, which contained no semicolons. The native executor sends a `ws://127.0.0.1:port` Origin header; this is accepted, while browser HTTP(S) origins are rejected.
+
+The live bridge also recovered after the server process was restarted, restored the original executor function through `TazeBridge.Stop()`, and completed two concurrent CameraModule requests with matching response lengths. It was reinstalled and left connected after validation.

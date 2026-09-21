@@ -1,4 +1,5 @@
 #include "Taze/Decompiler.hpp"
+#include "WebSocketServer.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,8 @@ int main(int Argc, char **Argv)
         Taze::Options Settings;
         std::string Input, Output;
         bool Assembly = false;
+        bool Server = false;
+        unsigned Port = 8877;
         for (int I = 1; I < Argc; ++I)
         {
             std::string Arg = Argv[I];
@@ -23,6 +26,8 @@ int main(int Argc, char **Argv)
             if (Arg == "--help" || Arg == "-h")
             {
                 std::cout << "Taze Luau decompiler\nUsage: taze INPUT.luac [-o OUTPUT.luau] [options]\n\n"
+                             "  --serve                      Start the local WebSocket bridge (Windows)\n"
+                             "  --port N                     Bridge port (default: 8877)\n"
                              "  --encoding auto|plain|roblox   Decode opcode bytes (default: auto)\n"
                              "  --disassemble                Print bytecode instructions\n"
                              "  --state-machine              Force explicit control-flow lowering\n"
@@ -56,12 +61,31 @@ int main(int Argc, char **Argv)
                 Settings.ForceStateMachine = true;
             else if (Arg == "--disassemble")
                 Assembly = true;
+            else if (Arg == "--serve")
+                Server = true;
+            else if (Arg == "--port")
+            {
+                auto Text = Value();
+                std::size_t Used = 0;
+                auto Number = std::stoul(Text, &Used);
+                if (Used != Text.size() || Number == 0 || Number > 65535)
+                    throw Taze::Error("Invalid port");
+                Port = unsigned(Number);
+            }
             else if (Arg.starts_with('-'))
                 throw Taze::Error("Unknown option " + Arg);
             else if (Input.empty())
                 Input = Arg;
             else
                 throw Taze::Error("Expected exactly one input file");
+        }
+        if (Server)
+        {
+            if (!Input.empty() || !Output.empty() || Assembly)
+                throw Taze::Error("--serve cannot be combined with file input/output or --disassemble");
+            if (Settings.IndentWidth < 1 || Settings.IndentWidth > 16)
+                throw Taze::Error("Indent must be between 1 and 16");
+            return Taze::ServeWebSocket(Port, Settings);
         }
         if (Input.empty())
             throw Taze::Error("Usage: taze INPUT.luac [-o OUTPUT.luau]; see --help");
