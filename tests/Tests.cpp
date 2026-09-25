@@ -222,21 +222,16 @@ int main()
                                         "end\nreturn Probe";
         auto Bytecode = Luau::compile(StyleSource, Compile);
         auto Source = Taze::Decompile(Bytecode).Source;
-        Check(Source.find("-- Line: 2 | filtergc(\"function\", { Line = 2, Name = \"Probe\", Constants = {") != std::string::npos,
+        Check(Source.find("-- Line: 2 | filtergc(\"function\", { Line = 2, Name = \"Probe\" }, true)") != std::string::npos,
               "Missing inline locator or serialized function name");
         auto Start = Source.find("filtergc(");
         auto Lookup = Source.substr(Start, Source.find('\n', Start) - Start);
-        auto LookupTest = Luau::compile("local function filtergc(Kind, Options, One) assert(Kind=='function' and One==true) "
-                                        "assert(Options.Name=='Probe') "
-                                        "local StringFound, NumberFound, ImportFound = false,false,false "
-                                        "for _,Value in Options.Constants do "
-                                        "if Value==\"Marker\\n\\\"\\\\\\000\" then StringFound=true end "
-                                        "if Value==12345.75 then NumberFound=true end "
-                                        "if Value==math.abs then ImportFound=true end "
-                                        "assert(Value~=7, 'An upvalue was incorrectly included as a constant') end "
-                                        "return StringFound,NumberFound,ImportFound,Options.Line end return " +
+        auto LookupTest = Luau::compile("local function filtergc(Kind, Options, One) "
+                                        "assert(Kind=='function' and One==true) "
+                                        "return Options.Name,Options.Line,Options.Constants end return " +
                                         Lookup);
-        Check(Execute(LookupTest) == Execute(Luau::compile("return true,true,true,2")), "Locator constants do not match original values");
+        Check(Execute(LookupTest) == Execute(Luau::compile("return 'Probe',2,nil")),
+              "Named locator should use the original name and line without constants");
         Check(Source.find("Upvalues:\n        1: Shared (type \"Copy\")") != std::string::npos, "Missing Upvalues label");
         Check(Source.find("local First = Input.Name\n    local Second = Input.Value\n\n    Input.Value = First") != std::string::npos,
               "Consecutive locals were not grouped and separated from writes");
@@ -259,6 +254,25 @@ int main()
         Check(Stripped.find("-- Line: 2 | filtergc(\"function\", { Line = 2,") != std::string::npos,
               "Stripped local debug names should preserve the serialized function start line");
         Check(Stripped.find(", Name = ") == std::string::npos, "Stripped function acquired an invented GC name");
+        auto StrippedStart = Stripped.find("filtergc(");
+        auto StrippedLookup = Stripped.substr(StrippedStart, Stripped.find('\n', StrippedStart) - StrippedStart);
+        auto StrippedTest = Luau::compile("local function filtergc(_, Options) "
+                                          "return Options.Line,Options.Name,#Options.Constants end return " +
+                                          StrippedLookup);
+        Check(Execute(StrippedTest) == Execute(Luau::compile("return 2,nil,5")), "Unnamed locator must limit constants to five");
+        Compile.debugLevel = 2;
+        auto PreserveSource = Taze::Decompile(Luau::compile("local function lowerCamel() return 7 end return lowerCamel", Compile)).Source;
+        Check(PreserveSource.find("function lowerCamel(") != std::string::npos, "Function name casing changed");
+        Compile.debugLevel = 0;
+        auto TableSource = Taze::Decompile(Luau::compile("local A,B={},{} A[1]=0 B[1]=1 return A,B", Compile)).Source;
+        Check(TableSource.find("return { [1] = 0 }, { [1] = 1 }") != std::string::npos,
+              "Interleaved small tables were not folded and redundant locals removed");
+        auto AliasSource = Taze::Decompile(Luau::compile("local A={}; local B=A; print(B,B); return B", Compile)).Source;
+        Check(AliasSource.find("print(Table1, Table1)") != std::string::npos && AliasSource.find("local Table2") == std::string::npos,
+              "Repeated stable aliases were not removed");
+        auto MutableSource = Taze::Decompile(Luau::compile("local A=1; local B=A; A=2; return B,A", Compile)).Source;
+        Check(MutableSource.find("return 1, 2") != std::string::npos || MutableSource.find("return Number1, 2") != std::string::npos,
+              "Mutable source alias lost its snapshot value");
     }
     catch (const std::exception &Error)
     {

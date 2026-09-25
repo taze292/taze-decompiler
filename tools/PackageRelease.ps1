@@ -1,4 +1,4 @@
-param([string]$Version = '0.1.0', [string]$BuildDirectory = 'build-release')
+param([string]$Version = '0.1.1', [string]$BuildDirectory = 'build-release')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Version must use major.minor.patch format.' }
 $Project = Split-Path $PSScriptRoot -Parent

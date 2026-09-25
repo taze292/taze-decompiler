@@ -6,7 +6,7 @@ The supplied Luau source stays on disk as a build dependency and is **excluded f
 
 ## Download
 
-Download [Taze v0.1.0 for Windows x64](https://github.com/taze292/taze-decompiler/releases/tag/v0.1.0). Extract the ZIP and run `Start-Decompiler.cmd` (or run `taze.exe --serve`). Keep it running, then execute the included `Decompile.luau` loader in your executor. The loader downloads the bridge pinned to the same release tag. The executable and loader are also available as individual assets, with SHA-256 checksums. The packaged executable includes the C++ runtime and does not require Clang or the Luau source checkout.
+Download [Taze v0.1.1 for Windows x64](https://github.com/taze292/taze-decompiler/releases/tag/v0.1.1). Extract the ZIP and run `Start-Decompiler.cmd` (or run `taze.exe --serve`). Keep it running, then execute the included `Decompile.luau` loader in your executor. The loader downloads the bridge pinned to the same release tag. The executable and loader are also available as individual assets, with SHA-256 checksums. The packaged executable includes the C++ runtime and does not require Clang or the Luau source checkout.
 
 ## Build on this Windows machine
 
@@ -100,7 +100,7 @@ Input must be **raw, decompressed serialized Luau bytecode**, such as the string
 
 Other options: `--indent 2`, `--no-header`, `--no-lines`, `--no-filtergc`, `--no-upvalues`, and `--state-machine`. Failures produce a nonzero exit code and an explanatory message. Reconstruction finishes before the output file is opened, so an unsupported input does not leave a partial source file.
 
-Use `--module-path 'game.ReplicatedStorage.MyModule'` to enable exported-function lookups for file input, and `--filter-line StartLine` to select that GC filter key manually. The default is `Line`. The corresponding C++ fields are `Options.ModulePath` and `Options.FilterLineField`.
+Use `--module-path 'game:FindFirstChild("ReplicatedStorage"):FindFirstChild("MyModule")'` to enable exported-function lookups for file input, and `--filter-line StartLine` to select that GC filter key manually. The default is `Line`. The corresponding C++ fields are `Options.ModulePath` and `Options.FilterLineField`.
 
 ### Local fixture
 
@@ -115,7 +115,7 @@ The compiler's last two arguments are optimization level and debug level. Debug 
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
-local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Name = "ServiceNames", Constants = { "Name" } }, true)
+local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Name = "ServiceNames" }, true)
     --[[
         Upvalues:
         1: UserInputService (type "Copy")
@@ -126,13 +126,13 @@ local function ServiceNames() -- Line: 4 | filtergc("function", { Line = 4, Name
 end
 ```
 
-Global names, table fields, and method names retain their original spelling, because changing them would change program behavior. Generated locals and function bindings use PascalCase and avoid collisions with globals and enclosing locals. Names are allocated after optimization, so eliminated temporaries do not leave names such as `Value438` or unnecessary suffixes on imported modules. Anonymous locals with a known type use independent `Table1`, `Function1`, `String1`, `Number1`, `Boolean1`, `Vector1`, or `Integer1` sequences. Type propagation follows copies and combines branch/loop definitions; mixed or unknown types retain `Value1`, `Value2`, etc. Debug names and meaningful inferred names take precedence. A missing line number is reported as `Unknown`. Comments, type annotations, and names erased by the compiler cannot be recovered exactly.
+Global names, table fields, method names, and valid original function names retain their spelling. Generated locals use PascalCase and avoid collisions with globals and enclosing locals. Names are allocated after optimization, so eliminated temporaries do not leave names such as `Value438` or unnecessary suffixes on imported modules. Anonymous locals with a known type use independent `Table1`, `Function1`, `String1`, `Number1`, `Boolean1`, `Vector1`, or `Integer1` sequences. Generated reference-capture boxes are tables and receive `TableN` names. Type propagation follows copies and combines branch/loop definitions; mixed or unknown types retain `Value1`, `Value2`, etc. Debug names and meaningful inferred names take precedence. A missing line number is reported as `Unknown`. Comments, type annotations, and names erased by the compiler cannot be recovered exactly.
 
 Generated statements have no semicolons. Parenthesized call statements use a `do` block where needed to avoid Luau's ambiguous statement boundary; literal string contents remain intact. Consecutive locals stay together, with separate groups for services and module imports. Blank lines separate declaration groups, writes, calls, returns, multiline tables, and control-flow blocks. Initializers stay in their original evaluation order. Blank lines contain no trailing indentation.
 
-Each recovered function's line comment includes an inline, copyable lookup. When its export path can be recovered and a module path is available, this becomes, for example, `-- Line: 4 | require(game.ReplicatedStorage.MyModule).Utilities.Read`. Nested tables, numeric or quoted keys, directly returned functions, and recognizable constructor/metatable exports are supported. A bounded static analysis follows returned values without executing the module. Conditional or conflicting exports, unknown mutations, and other unresolved cases retain GC lookups.
+Each recovered function's line comment includes an inline, copyable lookup. When its export path can be recovered and a module path is available, this becomes, for example, `-- Line: 4 | require(game:FindFirstChild("ReplicatedStorage"):FindFirstChild("MyModule")).Utilities.Read`. Nested tables, numeric or quoted keys, directly returned functions, and recognizable constructor/metatable exports are supported. A bounded static analysis follows returned values without executing the module. Conditional or conflicting exports, unknown mutations, and other unresolved cases retain GC lookups.
 
-For `filtergc` lookups, `Name` is included when the prototype contains an original debug name; generated PascalCase names are never substituted for missing metadata. Constants come from that function's own bytecode constant pool: strings, booleans, numbers, vectors, integers, and import expressions such as `Enum.CameraType.Custom`. Strings and names are escaped so the entire lookup stays on one line. Upvalues and immediate instruction operands are not constant-pool entries. Nil/NaN and table/closure templates are omitted because an array filter cannot meaningfully represent nil/NaN or recreate live object identity. If a start line is absent, the displayed line is `Unknown` and the selected line filter is `nil`.
+For `filtergc` lookups, `Name` is included when the prototype contains an original debug name; generated names are never substituted for missing metadata. When both name and line are present, the lookup uses only those two filters. Otherwise, it adds at most five constants from that function's own bytecode constant pool: strings, booleans, numbers, vectors, integers, and import expressions such as `Enum.CameraType.Custom`. Strings and names are escaped so the entire lookup stays on one line. Upvalues and immediate instruction operands are not constant-pool entries. Nil/NaN and table/closure templates are omitted because an array filter cannot meaningfully represent nil/NaN or recreate live object identity. If a start line is absent, the displayed line is `Unknown` and the selected line filter is `nil`.
 
 GC lookups depend on the executor's `filtergc` support and the function being alive; line/constants alone do not guarantee a unique match. The connected executor successfully matched all 31 emitted CameraModule lookups; the updated probe verified `StartLine`. Use `--no-filtergc` (or `Options.IncludeFunctionLocators = false`) to suppress either kind of lookup and keep just the line number; `--no-lines` hides the entire comment. The API's [function-filter documentation](https://docs.chimera.best/Environment/filtergc/FunctionFilterOptions/) describes constant matching.
 

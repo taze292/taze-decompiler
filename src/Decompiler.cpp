@@ -446,12 +446,12 @@ class Engine
             Names.insert(Name);
         GlobalNames = Names;
     }
-    unsigned New(std::string Name, unsigned Owner, bool Keep = false, bool Parameter = false, bool Cell = false)
+    unsigned New(std::string Name, unsigned Owner, bool Keep = false, bool Parameter = false, bool Cell = false, bool Preserve = false)
     {
         if (Name.starts_with("Value") && Name.size() > 5 &&
             std::all_of(Name.begin() + 5, Name.end(), [](unsigned char C) { return std::isdigit(C); }))
             Name = "Value" + std::to_string(++NextValue);
-        Name = Pascal(Name);
+        Name = Preserve && Identifier(Name) ? Name : Pascal(Name);
         std::string Base = Name;
         unsigned Suffix = 2;
         while (Names.count(Name))
@@ -814,6 +814,11 @@ void Function::BuildDataflow()
     for (const auto &[S, Mask] : Types)
         if (auto It = Categories.find(Mask); It != Categories.end())
             E.Symbols[S].Category = It->second;
+    // Reference captures are represented by an actual one-element table in
+    // generated source, regardless of the type of the captured value.
+    for (auto &S : E.Symbols)
+        if (S.Owner == Id && S.Cell)
+            S.Category = "Table";
 }
 
 unsigned Function::SymbolAt(unsigned R, unsigned Pc, bool Write) const
@@ -903,7 +908,8 @@ std::string Function::ConstantAt(unsigned Index, unsigned Recursion) const
 std::string Function::Locator() const
 {
     std::vector<std::string> Constants;
-    for (unsigned Index = 0; Index < P.Constants.size(); ++Index)
+    bool HasLineAndName = P.Line && !P.Name.empty();
+    for (unsigned Index = 0; !HasLineAndName && Index < P.Constants.size() && Constants.size() < 5; ++Index)
     {
         const auto &K = P.Constants[Index];
         switch (K.Tag)
@@ -927,8 +933,8 @@ std::string Function::Locator() const
         }
     }
     auto Text = "filtergc(\"function\", { " + E.Settings.FilterLineField + " = " + (P.Line ? std::to_string(P.Line) : "nil") +
-                (P.Name.empty() ? "" : ", Name = " + Quote(P.Name)) + ", Constants = {" +
-                (Constants.empty() ? "" : " " + Join(Constants) + " ") + "} }, true)";
+                (P.Name.empty() ? "" : ", Name = " + Quote(P.Name)) +
+                (HasLineAndName ? "" : ", Constants = {" + (Constants.empty() ? "" : " " + Join(Constants) + " ") + "}") + " }, true)";
     E.Locators[Id] = Text;
     return "\x1d" + std::to_string(Id) + "\x1c";
 }
@@ -997,7 +1003,8 @@ std::string Function::Closure(const Instruction &I, std::vector<Statement> &Out)
                             ++Definitions;
                 SelfSymbol = !Dispatch && !E.Symbols[Destination].Cell && Definitions == 1
                                  ? Destination
-                                 : E.New(E.C.Prototypes[Child].Name.empty() ? "RecursiveFunction" : E.C.Prototypes[Child].Name, Id, true);
+                                 : E.New(E.C.Prototypes[Child].Name.empty() ? "RecursiveFunction" : E.C.Prototypes[Child].Name, Id, true,
+                                         false, false, true);
                 Self = Token(SelfSymbol);
             }
             U.Value = Self;
@@ -1273,9 +1280,11 @@ void Function::Simple(const Instruction &I, std::vector<Statement> &Out)
         unsigned S = SymbolAt(I.A, I.Pc, true);
         E.Symbols[S].Keep = true;
         unsigned Child = I.Op == LOP_NEWCLOSURE ? P.Children.at(unsigned(I.D)) : P.Constants.at(unsigned(I.D)).Index;
-        if (!E.C.Prototypes[Child].Name.empty() && E.Symbols[S].Name.starts_with("Value"))
+        const auto &FunctionName = E.C.Prototypes[Child].Name;
+        if (!FunctionName.empty() &&
+            (E.Symbols[S].Name.starts_with("Value") || (Identifier(FunctionName) && E.Symbols[S].Base == Pascal(FunctionName))))
         {
-            unsigned Nice = E.New(E.C.Prototypes[Child].Name, Id, true);
+            unsigned Nice = E.New(FunctionName, Id, true, false, false, true);
             E.Symbols[S].Name = E.Symbols[Nice].Name;
             E.Symbols[S].Base = E.Symbols[Nice].Base;
         }
@@ -1940,6 +1949,38 @@ void Function::Optimize(std::vector<Statement> &Nodes)
         for (std::size_t N = 0; N < Nodes.size();)
         {
             auto &S = Nodes[N];
+            // A temporary that merely copies a stable local can be replaced at
+            // every straight-line use, even when the copy is read more than once.
+            if (S.Type == Kind::Assign && S.Left.size() == 1 && !E.Symbols[S.Left[0]].Keep && WritesCount[S.Left[0]] == 1)
+            {
+                auto From = Tokens(S.Text);
+                if (From.size() == 1 && S.Text == Token(From.front()) && From.front() != S.Left[0] && !E.Symbols[From.front()].Cell &&
+                    !E.Symbols[From.front()].ReferenceAlias)
+                {
+                    bool Initialized = E.Symbols[From.front()].Parameter && WritesCount[From.front()] == 0;
+                    if (WritesCount[From.front()] == 1)
+                        for (std::size_t J = 0; J < N; ++J)
+                            Initialized |= std::find(Nodes[J].Left.begin(), Nodes[J].Left.end(), From.front()) != Nodes[J].Left.end();
+                    unsigned Uses = 0;
+                    std::size_t End = N + 1;
+                    for (; Initialized && End < Nodes.size(); ++End)
+                    {
+                        const auto &Later = Nodes[End];
+                        if (!Later.Body.empty() || !Later.Else.empty() || Later.Type == Kind::While || Later.Type == Kind::Repeat ||
+                            Later.Type == Kind::For || Later.Type == Kind::Function || Later.Text.find('\n') != std::string::npos)
+                            break;
+                        auto References = Tokens(Later.Text);
+                        Uses += unsigned(std::count(References.begin(), References.end(), S.Left[0]));
+                    }
+                    if (Initialized && Uses && Uses == Reads[S.Left[0]])
+                    {
+                        for (std::size_t J = N + 1; J < End; ++J)
+                            Replace(Nodes[J].Text, Token(S.Left[0]), Token(From.front()));
+                        Nodes.erase(Nodes.begin() + std::ptrdiff_t(N));
+                        continue;
+                    }
+                }
+            }
             if (S.Type == Kind::Assign && S.Left.size() == 3 && N + 1 < Nodes.size() && Nodes[N + 1].Type == Kind::For)
             {
                 auto &Loop = Nodes[N + 1];
@@ -2082,9 +2123,18 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                 continue;
             auto Table = Token(S.Left[0]);
             std::vector<std::string> Fields;
-            while (N + 1 < List.size() && List[N + 1].Type == Kind::Raw)
+            for (std::size_t J = N + 1; J < List.size();)
             {
-                auto Text = List[N + 1].Text;
+                // Independent empty table allocations may be interleaved with
+                // the first writes to this table.
+                if (List[J].Type == Kind::Assign && List[J].Left.size() == 1 && List[J].Text == "{}")
+                {
+                    ++J;
+                    continue;
+                }
+                if (List[J].Type != Kind::Raw)
+                    break;
+                auto Text = List[J].Text;
                 if (!Text.starts_with(Table))
                     break;
                 auto Equal = Text.find(" = ");
@@ -2094,12 +2144,15 @@ void Function::Optimize(std::vector<Statement> &Nodes)
                 if (Right.find(Table) != std::string::npos)
                     break;
                 auto Key = Text.substr(Table.size(), Equal - Table.size());
+                if (J > N + 1 && (!Tokens(Key).empty() || !Tokens(Right).empty() ||
+                                  std::any_of(Right.begin(), Right.end(), [](unsigned char C) { return std::isalpha(C); })))
+                    break;
                 if (Key.starts_with('.'))
                     Key.erase(0, 1);
                 else if (!(Key.starts_with('[') && Key.ends_with(']')))
                     break;
                 Fields.push_back(Key + " = " + Right);
-                List.erase(List.begin() + std::ptrdiff_t(N + 1));
+                List.erase(List.begin() + std::ptrdiff_t(J));
             }
             if (Fields.size() > 3)
             {
@@ -2195,8 +2248,13 @@ std::string Function::Render(const std::vector<Statement> &Nodes, unsigned Inden
             if (!References.empty() && S.Text.starts_with(Token(References.front())))
                 Receiver = Token(References.front());
         }
-        if (Previous != Group::None && (Current != Previous || Block || Current == Group::Table ||
-                                        (!Receiver.empty() && !PreviousReceiver.empty() && Receiver != PreviousReceiver)))
+        bool Boundary =
+            Block || Previous == Group::Block || Current == Group::Exit || Previous == Group::Exit || Current == Group::Table ||
+            Previous == Group::Table ||
+            ((Current != Previous) && (Current == Group::Locals || Previous == Group::Locals || Current == Group::Services ||
+                                       Previous == Group::Services || Current == Group::Modules || Previous == Group::Modules)) ||
+            (!Receiver.empty() && !PreviousReceiver.empty() && Receiver != PreviousReceiver);
+        if (Previous != Group::None && Boundary)
             Separate();
         switch (S.Type)
         {
@@ -2448,7 +2506,8 @@ std::string Function::Generate(bool Main)
         Declared.insert(PackSymbol);
         Declared.insert(TopSymbol);
     }
-    if (!Out.empty() && !Out.ends_with("\n\n"))
+    bool FollowsLocals = !Nodes.empty() && Nodes.front().Type == Kind::Assign && !Nodes.front().Text.starts_with("function(");
+    if (!Out.empty() && !Out.ends_with("\n\n") && !FollowsLocals)
         Out += '\n';
     Out += Render(Nodes, Indent, Declared, Hoist);
     return Out;
