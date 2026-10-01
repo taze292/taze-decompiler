@@ -6,7 +6,7 @@ The supplied Luau source stays on disk as a build dependency and is **excluded f
 
 ## Download
 
-Download [Taze v0.1.1 for Windows x64](https://github.com/taze292/taze-decompiler/releases/tag/v0.1.1). Extract the ZIP and run `Start-Decompiler.cmd` (or run `taze.exe --serve`). Keep it running, then execute the included `Decompile.luau` loader in your executor. The loader downloads the bridge pinned to the same release tag. The executable and loader are also available as individual assets, with SHA-256 checksums. The packaged executable includes the C++ runtime and does not require Clang or the Luau source checkout.
+Download [Taze v0.2.0 for Windows x64](https://github.com/taze292/taze-decompiler/releases/tag/v0.2.0). Extract the ZIP and run `Start-Decompiler.cmd` (or run `taze.exe --serve`). Keep it running, then execute the included `Decompile.luau` loader in your executor. The loader downloads the bridge pinned to the same release tag. The executable and loader are also available as individual assets, with SHA-256 checksums. The packaged executable includes the C++ runtime and does not require Clang or the Luau source checkout.
 
 ## Build on this Windows machine
 
@@ -30,7 +30,7 @@ The default dependency locations are `luau/` or the existing `luau-master/luau-m
 For a fresh clone, obtain the [official Luau source](https://github.com/luau-lang/luau) separately. The snapshot used here declares opcodes through `FASTPCALL` and `NEWCLASS`, with a maximum ordinary bytecode version of 14. Its `Common/include/Luau/Bytecode.h` SHA-256 is:
 
 ```text
-f65c8a45e3c6f3888c923b805b8698c74d612a27ca68918d3065995dbbfda669
+efdb830caeeac39f2d57c8bcf62671f7e77e5309ab718cb3ad06d9205551d52f
 ```
 
 On other systems with CMake and a C++20 compiler:
@@ -82,7 +82,7 @@ getgenv().TazeBridge.Stop()
 
 Bridge v3 also hooks existing decompiler references when `hookfunction` is available, so tools that cached the previous function can use Taze. It preserves these targets across reinstalls and restores their previous implementations on `Stop()`. This uses the executor's [hookfunction API](https://docs.chimera.best/Closures/hookfunction/); unsupported hooks fall back to global replacement. `TazeBridge.HookStatus` reports `installed`, `failed`, or `unavailable`. `TazeBridge.Decompile(Script)` is a direct entry point if another tool replaces the global later.
 
-After a call, `TazeBridge.LastRequest` shows `ModulePath`, `PathStatus`, `ExportLookups`, `GcLookups`, and `FilterLineField`. Cloned instance references are compared with `compareinstances` when available. Missing or ambiguous module paths produce a warning instead of silently disabling `require` lookups. Copy the current `tools/Decompile.luau`; its installation message identifies version 3.
+After a successful call, `TazeBridge.LastRequest` shows `ModulePath`, `PathStatus`, `ExportLookups`, `GcLookups`, and `FilterLineField`. Cloned instance references are compared with `compareinstances` when available. Bridge v4 returns `nil` silently when installation or decompilation cannot complete, including unavailable APIs, connection failures, invalid inputs, timeouts, and server errors. Copy the current `tools/Decompile.luau`; its installation message identifies version 4.
 
 Supported executor APIs are `WebSocket.connect`, `websocket.connect`, or `syn.websocket.connect`, with `Send`, `Close`, `OnMessage`, and `OnClose`. The server binds only to IPv4 loopback, supports up to eight connected clients, and disconnects sockets after ten idle minutes; the bridge reconnects on demand. Stop the server with Ctrl+C in its terminal. Existing formatting options such as `--indent 2` and `--no-upvalues` also apply in server mode. Other platforms retain file-based decompilation.
 
@@ -154,7 +154,7 @@ Taze::Result Result = Taze::Decompile(BytecodeString, Options);
 
 ## Compatibility and tests
 
-The reader supports serialized versions **3–14**, type metadata 1–3, and parses the experimental version-100 envelope. Execution tests cover compiler-produced versions **9, 11, 12, 13, and 14**, including Roblox opcode encoding. Older reader branches are not backed by historical compiler binaries in this repository.
+The reader supports serialized versions **3–14**, type metadata 1–3, and parses the experimental version-100 envelope. Execution tests cover compiler-produced versions **9, 11, 12, 13, and 14**, including Roblox opcode encoding. A dedicated compatibility check compiles both the v12 float-vector form and the v13 double-vector form, verifies that v13 precision survives decompilation, and rejects v13-only constants mislabeled as v12. Older reader branches are not backed by historical compiler binaries in this repository.
 
 Implemented reconstruction includes arithmetic, comparisons, short-circuit control flow, imports, table/member operations, method calls, fixed and open return tuples, varargs, closures, copy/reference captures, upvalue closing, numeric/generic loops, and fastcall fallback paths. Register dataflow separates reused temporary slots and merges live values at control-flow joins. Explicit local snapshots and reference cells preserve captured lifetimes without generated, immediately invoked closure factories. Recursive closures use named local functions where possible. Integer constants use `integer.fromstring`; vector constants use `vector.create`, so those outputs require the corresponding target-runtime libraries.
 
@@ -164,13 +164,13 @@ The tests compile source, decompile it, recompile the result, and compare return
 
 ### Connected Roblox validation
 
-Tested against client **0.739.0.7390687** using the specifically selected script:
+The v13 update was tested against client **0.737.0.7371584** using the specifically selected script available in that session:
 
 ```luau
-getscriptbytecode(game.Players.LocalPlayer.PlayerScripts.PlayerModule.CameraModule)
+getscriptbytecode(game.StarterPlayer.StarterPlayerScripts.PlayerModule.CameraModule)
 ```
 
-The captured module contains **13,117 bytes**, bytecode version **12**, type version **3**, and **32 prototypes**. Its decompiled output compiled successfully both locally and through Roblox's `loadstring`. All 32 prototypes reconstruct without state-machine fallback. Control-flow improvements reduced the original 92,557-byte output to 25,048 bytes; with the requested spacing and inline lookup comments, the current bridge output is **32,900 bytes** using the verified `StartLine` key (32,745 with `Line`). It contains no generated capture-factory calls. CameraModule calls its constructor but returns an empty table, so its functions correctly retain GC lookups. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
+The captured module contains **13,117 bytes**, bytecode version **13**, and type version **3**. The v3 bridge returned **28,158 bytes** using the verified `StartLine` key; Roblox's `loadstring` accepted the output, all **31** function locators were retained, and no function required state-machine fallback. This is the same module shape previously validated as v12, so the v12 checks remain in the regression suite while v13 is handled as an additive format update. It contains no generated capture-factory calls. CameraModule calls its constructor but returns an empty table, so its functions correctly retain GC lookups. The project fixture also executed in Roblox with identical results before and after decompilation, including services, mutable closures, loops, and trailing nil varargs.
 
 CameraModule itself was **compiled, not executed or substituted for the running camera controller**. A successful compilation does not establish full behavioral equivalence for that module. Extracted bytecode, generated CameraModule source, and test harnesses live in the ignored `artifacts/` directory.
 

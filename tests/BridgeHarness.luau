@@ -80,7 +80,11 @@ for _, Mode in { "Line", "StartLine", "Both", "Ignored", "Missing", "Hidden" } d
         function Socket:Send(Message)
             Environment.Message = Message
             local Id = Message:match("^(%d+)\n")
-            self.OnMessage:Fire(Id .. "\nok\nreturn 1")
+            if Environment.ServerError then
+                self.OnMessage:Fire(Id .. "\nerror\nmock server failure")
+            else
+                self.OnMessage:Fire(Id .. "\nok\nreturn 1")
+            end
         end
         Environment.Socket = Socket
         return Socket
@@ -91,7 +95,13 @@ for _, Mode in { "Line", "StartLine", "Both", "Ignored", "Missing", "Hidden" } d
     assert(Bridge.FilterLineField == Expected, "Wrong detected line field for " .. Mode)
     assert(Bridge.LineProbe == (if Mode == "Ignored" or Mode == "Missing" or Mode == "Hidden" then "fallback" else "verified"))
     assert(Environment.decompile(Target) == "return 1")
-    assert(Bridge.Version == 3 and Bridge.Decompile == Environment.decompile)
+    assert(Bridge.Version == 4 and Bridge.Decompile == Environment.decompile)
+    assert(Environment.decompile({}) == nil, "Invalid targets must exit silently")
+    assert(Environment.decompile(Target, 0) == nil, "Invalid timeouts must exit silently")
+    local SavedBytecode = Target.Bytecode
+    Target.Bytecode = nil
+    assert(Environment.decompile(Target) == nil, "Missing bytecode must exit silently")
+    Target.Bytecode = SavedBytecode
     if Mode ~= "Missing" and Mode ~= "Hidden" then
         assert(Bridge.HookStatus == "installed" and Original(Target) == "return 1")
     else
@@ -108,7 +118,7 @@ for _, Mode in { "Line", "StartLine", "Both", "Ignored", "Missing", "Hidden" } d
     local Detached = Instance("Detached", "ModuleScript")
     Detached.Bytecode = Target.Bytecode
     assert(Environment.decompile(Detached) == "return 1")
-    assert(Bridge.LastRequest.ModulePath == "" and Environment.Warning:find("not parented", 1, true))
+    assert(Bridge.LastRequest.ModulePath == "" and Bridge.LastRequest.PathStatus:find("not parented", 1, true))
     Target.Class = "LocalScript"
     assert(Environment.decompile(Target) == "return 1")
     assert(Environment.Message:find("\n" .. Expected .. "\n\n", 1, true))
@@ -116,6 +126,11 @@ for _, Mode in { "Line", "StartLine", "Both", "Ignored", "Missing", "Hidden" } d
     Environment.Socket:Close()
     assert(not Bridge.Connected)
     assert(Environment.decompile(Target) == "return 1" and Environment.Connects == 2)
+    Environment.Socket.Send = function() error("mock send failure") end
+    assert(Environment.decompile(Target) == nil, "Send failures must exit silently")
+    Environment.ServerError = true
+    assert(Environment.decompile(Target) == nil, "Server errors must exit silently")
+    Environment.ServerError = false
     local SavedWrapper
     SavedWrapper = function(...) return Implementations[SavedWrapper](...) end
     Implementations[SavedWrapper] = function() return "wrapper" end
@@ -127,6 +142,7 @@ for _, Mode in { "Line", "StartLine", "Both", "Ignored", "Missing", "Hidden" } d
         assert(SavedWrapper(Target) == "return 1", "Reinstallation lost a previously hooked cached wrapper")
     end
     Replacement.Stop()
+    assert(Replacement.Decompile(Target) == nil, "Stopped bridges must exit silently")
     assert(Environment.decompile == Original and Environment.TazeBridge == nil)
     assert(Original(Target) == "original", "Stop did not restore the cached decompiler")
     assert(SavedWrapper(Target) == "wrapper", "Stop did not restore the cached wrapper")

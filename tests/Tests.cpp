@@ -457,6 +457,71 @@ int main()
         if (Enabled)
             Enabled->value = Old;
     }
+    // Version 13 is additive over version 12: exercise the constant encoding that actually distinguishes them.
+    // The general version loop above changes the header, but its scalar fixtures do not emit LBC_CONSTANT_VECTORD.
+    {
+        Luau::FValue<bool> *CostModel = nullptr;
+        Luau::FValue<bool> *VectorDouble = nullptr;
+        for (auto *Flag = Luau::FValue<bool>::list; Flag; Flag = Flag->next)
+        {
+            if (std::string_view(Flag->name) == "LuauBytecodeCostModel")
+                CostModel = Flag;
+            else if (std::string_view(Flag->name) == "LuauCompileEmitVectorDouble")
+                VectorDouble = Flag;
+        }
+        if (!CostModel || !VectorDouble)
+        {
+            std::cerr << "Missing v12/v13 feature flags\n";
+            Failed++;
+        }
+        else
+        {
+            bool OldCostModel = CostModel->value;
+            bool OldVectorDouble = VectorDouble->value;
+            try
+            {
+                Luau::CompileOptions Options;
+                Options.optimizationLevel = 2;
+                Options.vectorPrecision = 1;
+                const std::string Source = "return vector.create(1, 1/2^32, 1/2^256)";
+
+                CostModel->value = true;
+                VectorDouble->value = false;
+                auto V12 = Luau::compile(Source, Options);
+                auto V12Result = Taze::Decompile(V12);
+                if (V12Result.BytecodeVersion != 12 || V12Result.Source.find("vector.create(") == std::string::npos)
+                    throw std::runtime_error("Version 12 vector compatibility regressed");
+
+                VectorDouble->value = true;
+                auto V13 = Luau::compile(Source, Options);
+                auto V13Result = Taze::Decompile(V13);
+                if (V13Result.BytecodeVersion != 13 || V13Result.Source.find("8.636") == std::string::npos)
+                    throw std::runtime_error("Version 13 double-vector precision was not preserved");
+                auto Recompiled = Luau::compile(V13Result.Source, Options);
+                if (Recompiled.empty() || Recompiled[0] == 0)
+                    throw std::runtime_error("Version 13 double-vector output does not compile");
+
+                auto Mislabeled = V13;
+                Mislabeled[0] = 12;
+                try
+                {
+                    Taze::Decompile(Mislabeled);
+                    throw std::runtime_error("Version 12 accepted a version 13-only double-vector constant");
+                }
+                catch (const Taze::Error &)
+                {
+                }
+                Passed++;
+            }
+            catch (const std::exception &Error)
+            {
+                Failed++;
+                std::cerr << "FAIL v12/v13 feature boundary: " << Error.what() << '\n';
+            }
+            CostModel->value = OldCostModel;
+            VectorDouble->value = OldVectorDouble;
+        }
+    }
     // Malformed headers and length fields must be rejected, including overflow and unknown versions.
     for (const std::string &Bad : {std::string("\xff", 1), std::string("\x09\x03\xff\xff\xff\xff\xff", 7), Sample + "extra"})
     {

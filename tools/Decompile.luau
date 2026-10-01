@@ -1,23 +1,27 @@
 -- Start build/Release/taze.exe --serve before running this script.
 -- Optional: getgenv().TazeConfig = { Url = "ws://127.0.0.1:8877/decompile", Timeout = 30 }
 local Environment = getgenv and getgenv() or getfenv(0)
-local Config = Environment.TazeConfig or {}
+local Config = if type(Environment.TazeConfig) == "table" then Environment.TazeConfig else {}
 local Url = Config.Url or "ws://127.0.0.1:8877/decompile"
 local DefaultTimeout = Config.Timeout or 30
 local GetBytecode = getscriptbytecode or Environment.getscriptbytecode
-assert(type(GetBytecode) == "function", "Taze requires getscriptbytecode")
-assert(type(DefaultTimeout) == "number" and DefaultTimeout > 0 and DefaultTimeout < math.huge, "Taze timeout must be positive and finite")
+if type(GetBytecode) ~= "function" or type(DefaultTimeout) ~= "number" or DefaultTimeout <= 0 or DefaultTimeout >= math.huge then
+    return nil
+end
 
 local Provider = WebSocket or websocket or (syn and syn.websocket)
 local Connect = Provider and (Provider.connect or Provider.Connect)
-assert(type(Connect) == "function", "Taze requires WebSocket.connect, websocket.connect, or syn.websocket.connect")
+if type(Connect) ~= "function" then
+    return nil
+end
 
 local Previous = Environment.TazeBridge
 local PreviousDecompile = Environment.decompile or decompile
-local Original = if Previous and Previous.Marker == "TazeBridge1" then Previous.Original else Environment.decompile or decompile
-local Bridge = { Marker = "TazeBridge1", Version = 3, Original = Original, Url = Url, Connected = false }
+local IsPreviousBridge = type(Previous) == "table" and Previous.Marker == "TazeBridge1"
+local Original = if IsPreviousBridge then Previous.Original else Environment.decompile or decompile
+local Bridge = { Marker = "TazeBridge1", Version = 4, Original = Original, Url = Url, Connected = false }
 local HookTargets = { Original, PreviousDecompile }
-if Previous and Previous.Marker == "TazeBridge1" and Previous.HookTargets then
+if IsPreviousBridge and type(Previous.HookTargets) == "table" then
     for _, Target in Previous.HookTargets do
         table.insert(HookTargets, Target)
     end
@@ -38,7 +42,7 @@ end
 
 local function DetectLineField()
     local Filter = filtergc or Environment.filtergc
-    if type(Filter) ~= "function" or type(debug.info) ~= "function" then
+    if type(Filter) ~= "function" or type(debug) ~= "table" or type(debug.info) ~= "function" then
         return "Line", "fallback"
     end
 
@@ -164,10 +168,14 @@ end
 
 local function EnsureConnected(Deadline)
     while Connecting do
-        assert(os.clock() < Deadline, "Taze connection timed out")
+        if os.clock() >= Deadline then
+            return nil
+        end
         task.wait()
     end
-    assert(not Stopped, "Taze bridge has been stopped")
+    if Stopped then
+        return nil
+    end
     if Socket then
         return Socket
     end
@@ -187,13 +195,15 @@ local function EnsureConnected(Deadline)
     Connecting = false
     if not Attempt.Done then
         Attempt.Abandoned = true
-        error("Taze connection timed out or the bridge was stopped", 2)
+        return nil
     end
     local Ok, Result = Attempt.Ok, Attempt.Result
-    assert(Ok and Result, "Cannot connect to Taze. Start taze.exe --serve first. " .. tostring(Result))
+    if not Ok or not Result then
+        return nil
+    end
     if Stopped then
         pcall(function() Result:Close() end)
-        error("Taze bridge has been stopped", 2)
+        return nil
     end
     Socket = Result
     local Current = Result
@@ -222,7 +232,7 @@ local function EnsureConnected(Deadline)
     end)
     if not SetupOk then
         Disconnect("Unsupported executor WebSocket event API")
-        error(tostring(SetupError), 2)
+        return nil
     end
     Bridge.Connected = true
     return Current
@@ -233,21 +243,29 @@ for Byte = 0, 255 do
     Hex[string.char(Byte)] = string.format("%02x", Byte)
 end
 
-Installed = function(Target, Timeout)
-    assert(typeof(Target) == "Instance" and (Target:IsA("LocalScript") or Target:IsA("ModuleScript") or Target:IsA("Script")),
-        "decompile expects a script Instance")
+local function Decompile(Target, Timeout)
+    if typeof(Target) ~= "Instance" or not (Target:IsA("LocalScript") or Target:IsA("ModuleScript") or Target:IsA("Script")) then
+        return nil
+    end
     Timeout = Timeout or DefaultTimeout
-    assert(type(Timeout) == "number" and Timeout > 0 and Timeout < math.huge, "decompile timeout must be positive and finite")
+    if type(Timeout) ~= "number" or Timeout <= 0 or Timeout >= math.huge then
+        return nil
+    end
     local Deadline = os.clock() + Timeout
     local Current = EnsureConnected(Deadline)
+    if not Current then
+        return nil
+    end
     local Ok, Bytecode = pcall(GetBytecode, Target)
-    assert(Ok, "getscriptbytecode failed: " .. tostring(Bytecode))
-    assert(type(Bytecode) == "string" and #Bytecode > 0, "getscriptbytecode returned no bytecode for this script")
-    assert(#Bytecode <= 64 * 1024 * 1024, "Bytecode exceeds the 64 MiB limit")
+    if not Ok or type(Bytecode) ~= "string" or #Bytecode == 0 or #Bytecode > 64 * 1024 * 1024 then
+        return nil
+    end
     local Encoded = Bytecode:gsub(".", Hex)
     local Expression, PathStatus = ModulePath(Target)
     local Path = Expression:gsub(".", Hex)
-    assert(os.clock() < Deadline, "Taze timed out while reading bytecode")
+    if os.clock() >= Deadline then
+        return nil
+    end
     NextId += 1
     local Id = tostring(NextId)
     local Request = {}
@@ -258,15 +276,14 @@ Installed = function(Target, Timeout)
     if not Sent then
         Pending[Id] = nil
         Disconnect("Taze send failed: " .. tostring(SendError))
-        error("Taze send failed: " .. tostring(SendError), 2)
+        return nil
     end
     while not Request.Done and os.clock() < Deadline do
         task.wait()
     end
     Pending[Id] = nil
-    assert(Request.Done, "Taze decompile timed out after " .. Timeout .. " seconds")
-    if Request.Error then
-        error("Taze: " .. Request.Error, 2)
+    if not Request.Done or Request.Error or type(Request.Source) ~= "string" then
+        return nil
     end
     local _, ExportCount = Request.Source:gsub(" | require%(", "")
     local _, GcCount = Request.Source:gsub(" | filtergc%(", "")
@@ -277,10 +294,12 @@ Installed = function(Target, Timeout)
         GcLookups = GcCount,
         FilterLineField = Bridge.FilterLineField,
     }
-    if Target:IsA("ModuleScript") and Expression == "" then
-        warn("Taze: require lookups unavailable: " .. PathStatus)
-    end
     return Request.Source
+end
+
+Installed = function(...)
+    local Ok, Result = pcall(Decompile, ...)
+    return if Ok then Result else nil
 end
 
 function Bridge.Stop()
@@ -291,10 +310,7 @@ function Bridge.Stop()
     Disconnect("Taze bridge stopped")
     for Index = #Hooks, 1, -1 do
         local Entry = Hooks[Index]
-        local Ok, Error = pcall(Hook, Entry.Target, Entry.Backup)
-        if not Ok then
-            warn("Taze could not restore a decompile hook: " .. tostring(Error))
-        end
+        pcall(Hook, Entry.Target, Entry.Backup)
     end
     table.clear(Hooks)
     if Environment.decompile == Installed then
@@ -306,9 +322,11 @@ function Bridge.Stop()
 end
 
 -- Only replace the existing decompiler once the server connection succeeds.
-EnsureConnected(os.clock() + DefaultTimeout)
-if Previous and Previous.Marker == "TazeBridge1" then
-    Previous.Stop()
+if not EnsureConnected(os.clock() + DefaultTimeout) then
+    return nil
+end
+if IsPreviousBridge and type(Previous.Stop) == "function" then
+    pcall(Previous.Stop)
 end
 -- Global assignment alone misses tools that saved the executor's old function.
 Bridge.HookStatus = "unavailable"
@@ -336,5 +354,5 @@ end
 Environment.decompile = Installed
 Bridge.Decompile = Installed
 Environment.TazeBridge = Bridge
-print("Taze decompile v3 installed: " .. Url .. " | require export lookups | " .. Bridge.FilterLineField .. " (" .. Bridge.LineProbe .. ") | cached references: " .. Bridge.HookStatus)
+pcall(print, "Taze decompile v4 installed: " .. Url .. " | require export lookups | " .. Bridge.FilterLineField .. " (" .. Bridge.LineProbe .. ") | cached references: " .. Bridge.HookStatus)
 return Bridge

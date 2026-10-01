@@ -530,6 +530,8 @@ Chunk ReadBytecode(std::string_view Data, const Options &Settings)
                     V = R.Read<float>();
                 break;
             case LBC_CONSTANT_VECTORD:
+                if (C.Version < 13)
+                    R.Fail("double-precision vector constant requires bytecode version 13 or newer");
                 for (auto &V : K.Vector)
                     V = R.Read<double>();
                 break;
